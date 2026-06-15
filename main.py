@@ -1649,12 +1649,6 @@ async def roll(interaction: discord.Interaction):
     result = random.randint(1, 6)
     await interaction.response.send_message(f"🎲 You rolled a **{result}**!")
 
-@bot.tree.command(name="khaos", description="no sorry i can't")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def khaos(interaction: discord.Interaction):
-    await interaction.response.send_message(f"haha i'm so scary !!! im going to destroy you with my khaos powers !!! \n||ok i give up ):||")
-
 @bot.tree.command(name="random", description="Pick a random number between two values")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
