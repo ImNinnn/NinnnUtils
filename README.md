@@ -15,3 +15,5 @@ Install Link https://discord.com/oauth2/authorize?client_id=1500798502735708281
 Support Server https://discord.gg/FSBPvc9zqY
 
 ToS and Privacy policy https://imninnn.github.io
+
+To run this bot yourself, you will need to install the python libraries, any font for the banners and ffmpeg.exe for the youtube voice feature
