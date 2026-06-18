@@ -21,7 +21,16 @@ import g4f
 import base64
 from discord.ui import Modal, TextInput
 
-# --- Configuration ---
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Configuration
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 VERSION = os.getenv('BOT_VERSION')
@@ -42,7 +51,15 @@ LEVEL_FILE = os.path.join(BASE_DIR, 'level.json')
 USER_FILE = os.path.join(BASE_DIR, 'user.json')
 
 
-# --- Bot Setup ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Bot Setup
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
 class MyDiscordApp(commands.AutoShardedBot):
     def __init__(self, intents, shard_count: int = 0):
         super().__init__(
@@ -50,6 +67,7 @@ class MyDiscordApp(commands.AutoShardedBot):
             intents=intents,
             shard_count=shard_count or None,
         )
+
 
     async def setup_hook(self):
         shard_info = (
@@ -78,7 +96,32 @@ intents.members = True
 intents.presences = True
 bot = MyDiscordApp(intents=intents, shard_count=SHARD_COUNT)
 
-# --- Global State ---
+
+YTDL_OPTIONS = {
+    'format': 'bestaudio/best',
+    'noplaylist': True,
+    'quiet': True,
+    'no_warnings': True,
+    'default_search': 'auto',
+    'source_address': '0.0.0.0'
+}
+
+
+FFMPEG_OPTIONS = {
+    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
+    'options': '-vn'
+}
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Message Cache
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
 message_cache = []
 deleted_cache = []
 edited_cache = []
@@ -87,7 +130,15 @@ server_pauses = {}
 all_paused_guilds = set()
 reaction_xp_cooldowns = {}
 
-# --- Data Helpers ---
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Data Management
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 def load_levels():
     if not os.path.exists(LEVEL_FILE):
@@ -98,12 +149,15 @@ def load_levels():
         except json.JSONDecodeError:
             return {}
 
+
 def save_levels(data):
     with open(LEVEL_FILE, 'w') as f:
         json.dump(data, f, indent=4)
 
+
 def get_xp_needed(level: int) -> int:
     return 100 + (level * 10)
+
 
 def load_data():
     if not os.path.exists(DATA_FILE):
@@ -113,6 +167,7 @@ def load_data():
             return json.load(f)
         except json.JSONDecodeError:
             return {}
+
 
 def save_data(data):
     with open(DATA_FILE, 'w') as f:
@@ -147,9 +202,11 @@ def load_love_data():
     with open(LOVE_FILE, "r") as f:
         return json.load(f)
 
+
 def save_love_data(data):
     with open(LOVE_FILE, "w") as f:
         json.dump(data, f, indent=4)
+
 
 def load_fun_data():
     if not os.path.exists(FUN_FILE):
@@ -160,9 +217,11 @@ def load_fun_data():
         except json.JSONDecodeError:
             return {}
 
+
 def save_fun_data(data):
     with open(FUN_FILE, 'w') as f:
         json.dump(data, f, indent=4)
+
 
 def load_board_data():
     if not os.path.exists(BOARD_FILE):
@@ -173,9 +232,11 @@ def load_board_data():
         except json.JSONDecodeError:
             return {}
 
+
 def save_board_data(data):
     with open(BOARD_FILE, 'w') as f:
         json.dump(data, f, indent=4)
+
 
 def load_guild_data():
     if not os.path.exists(GUILD_FILE):
@@ -185,6 +246,7 @@ def load_guild_data():
             return json.load(f)
         except json.JSONDecodeError:
             return {}
+
 
 def save_guild_data(data):
     with open(GUILD_FILE, 'w') as f:
@@ -210,9 +272,6 @@ def save_lock_config(locked, admin):
 
 
 def get_guild_config(guild_id: str) -> dict:
-    """Return the guild config entry from guild.json, creating it if missing.
-    Add any new server-wide settings here in the future.
-    """
     data = load_guild_data()
     default_config = {
         "welcome_channel_id": None,
@@ -231,8 +290,8 @@ def get_guild_config(guild_id: str) -> dict:
     save_guild_data(data)
     return data[guild_id], data
 
+
 def get_guild_data(data, guild_id):
-    """Economy-specific guild data (economy.json)."""
     if guild_id not in data:
         data[guild_id] = {
             "users": {},
@@ -248,7 +307,6 @@ locked_channels, admin_log_channels = load_lock_config()
 
 
 def safe_eval_math_expr(expr: str) -> int | None:
-    """Evaluate a simple math expression safely and return an integer result."""
     try:
         tree = ast.parse(expr.strip(), mode='eval')
     except SyntaxError:
@@ -424,6 +482,7 @@ def migrate_inventory(user: dict) -> None:
             stacked[item] = stacked.get(item, 0) + 1
         user["inventory"] = stacked
 
+
 def get_user_data(data, guild_id, user_id):
     guild = get_guild_data(data, guild_id)
     user_id = str(user_id)
@@ -432,8 +491,10 @@ def get_user_data(data, guild_id, user_id):
     migrate_inventory(guild["users"][user_id])
     return guild["users"][user_id]
 
+
 def is_server_owner(interaction: discord.Interaction):
     return interaction.user.id == interaction.guild.owner_id
+
 
 def clean_cache():
     global message_cache, deleted_cache, edited_cache
@@ -442,10 +503,10 @@ def clean_cache():
     deleted_cache = [m for m in deleted_cache if now - m['time'] < timedelta(minutes=120)]
     edited_cache = [m for m in edited_cache if now - m['time'] < timedelta(minutes=120)]
 
-# --- Item Helpers (case-insensitive) ---
 
 def normalize_item(name: str) -> str:
     return name.strip().title()
+
 
 def find_item_key(dictionary: dict, item_name: str) -> str | None:
     target = item_name.strip().lower()
@@ -454,9 +515,11 @@ def find_item_key(dictionary: dict, item_name: str) -> str | None:
             return key
     return None
 
+
 def inventory_count(inventory: dict, item_name: str) -> int:
     key = find_item_key(inventory, item_name)
     return inventory[key] if key else 0
+
 
 def inventory_add(inventory: dict, item_name: str, amount: int = 1) -> None:
     key = find_item_key(inventory, item_name)
@@ -464,6 +527,7 @@ def inventory_add(inventory: dict, item_name: str, amount: int = 1) -> None:
         inventory[key] += amount
     else:
         inventory[item_name] = amount
+
 
 def inventory_remove(inventory: dict, item_name: str, amount: int = 1) -> int:
     key = find_item_key(inventory, item_name)
@@ -476,6 +540,7 @@ def inventory_remove(inventory: dict, item_name: str, amount: int = 1) -> int:
     else:
         inventory[key] -= removed
     return removed
+
 
 async def update_board(payload, emoji_str, remove_mode=False):
     guild_id = str(payload.guild_id)
@@ -539,7 +604,14 @@ async def update_board(payload, emoji_str, remove_mode=False):
         save_board_data(board_data)
 
 
-# --- UI Classes ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               UI Views
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 class ShopView(discord.ui.View):
     def __init__(self, shop_items, guild_id):
@@ -650,7 +722,14 @@ class DeletedMediaView(discord.ui.View):
             pass
 
 
-# --- Event Handlers ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Events
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 @bot.event
 async def on_voice_state_update(member, before, after):
@@ -668,6 +747,7 @@ async def on_voice_state_update(member, before, after):
                     await voice_client.disconnect()
                     print(f"Left empty voice channel in {member.guild.name} after 30 seconds.")
 
+
 @bot.event
 async def on_ready():
     shard_info = (
@@ -680,6 +760,7 @@ async def on_ready():
     if not update_presence.is_running():
         update_presence.start()
     bot.loop.create_task(blacklist_startup_cleanup())
+
 
 @bot.event
 async def on_message(message):
@@ -744,7 +825,6 @@ async def on_message(message):
     await bot.process_commands(message)
 
 
-
 @bot.event
 async def on_message_delete(message):
     global message_cache, deleted_cache
@@ -788,6 +868,7 @@ async def on_message_delete(message):
                         await channel.send(embed=embed)
             break
 
+
 @bot.event
 async def on_message_edit(before, after):
     if before.author.bot:
@@ -819,6 +900,8 @@ async def on_message_edit(before, after):
             
             msg['content'] = after.content
             break
+
+
 @bot.event
 async def on_member_join(member):
     guild_config, _ = get_guild_config(str(member.guild.id))
@@ -832,6 +915,7 @@ async def on_member_join(member):
             except Exception as e:
                 print(f"Error creating welcome card: {e}")
 
+
 @bot.event
 async def on_member_remove(member):
     guild_config, _ = get_guild_config(str(member.guild.id))
@@ -844,6 +928,7 @@ async def on_member_remove(member):
                 await channel.send(f"Goodbye {member.display_name}. We'll miss you!", file=goodbye_file)
             except Exception as e:
                 print(f"Error creating goodbye card: {e}")
+
 
 @bot.event
 async def on_raw_reaction_add(payload):
@@ -928,6 +1013,7 @@ async def on_raw_reaction_add(payload):
         config["tracked_messages"][message_id_str] = str(new_board_msg.id)
         save_board_data(board_data)
 
+
 @bot.event
 async def on_raw_reaction_remove(payload):
     if not payload.guild_id:
@@ -986,7 +1072,14 @@ async def on_raw_reaction_remove(payload):
         save_board_data(board_data)
 
 
-# --- Error Handling ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Error Handling
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 @bot.tree.error
 async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
@@ -1015,7 +1108,14 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
             await interaction.response.send_message("❌ An unexpected error occurred while executing this command.", ephemeral=True)
 
 
-# --- Presence Task ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Presence Update Loop
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 presence_toggle = True
 
@@ -1059,6 +1159,7 @@ async def update_presence():
 
     presence_toggle = not presence_toggle
 
+
 @update_presence.before_loop
 async def before_update_presence():
     await bot.wait_until_ready()
@@ -1071,7 +1172,14 @@ async def before_update_presence():
     await asyncio.sleep(30)
 
 
-# --- Server Blacklist ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Blacklist Handling
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 @bot.event
 async def on_guild_join(guild):
@@ -1081,6 +1189,7 @@ async def on_guild_join(guild):
     if guild.id in BLACKLISTED_GUILDS:
         print(f"🚫 Joined blacklisted guild: {guild.name} ({guild.id}). Leaving immediately...")
         await guild.leave()
+
 
 async def blacklist_startup_cleanup():
     await bot.wait_until_ready()
@@ -1095,7 +1204,12 @@ async def blacklist_startup_cleanup():
                 print(f"❌ Failed to leave {guild.name}: {e}")
 
 
-# --- Commands ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               User Level Commands
+# -------------------------------------------------------------------------------------------------------------
+
 
 
 
@@ -1164,48 +1278,6 @@ async def encode_decode_command(interaction: discord.Interaction, text: str, enc
             ephemeral=True
         )
 
-@bot.tree.command(name="adm-voice-move", description="Move everyone in your current voice channel to another voice channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(move_members=True)
-@app_commands.describe(
-    channel="Target voice channel to move everyone into"
-)
-async def adm_voice_move(interaction: discord.Interaction, channel: discord.VoiceChannel):
-    member = interaction.user
-    if not isinstance(member, discord.Member):
-        member = interaction.guild.get_member(interaction.user.id)
-
-    if not member or not member.voice or not member.voice.channel:
-        await interaction.response.send_message("❌ You must be connected to a voice channel to use this command.", ephemeral=True)
-        return
-
-    source_channel = member.voice.channel
-    if source_channel.id == channel.id:
-        await interaction.response.send_message("✅ You are already in the target voice channel.", ephemeral=True)
-        return
-
-    moved_members = []
-    failed_members = []
-    for target_member in list(source_channel.members):
-        try:
-            await target_member.move_to(channel, reason=f"Voice move initiated by {interaction.user}")
-            moved_members.append(target_member.display_name)
-        except Exception as e:
-            failed_members.append(f"{target_member.display_name}: {e}")
-
-    embed = discord.Embed(
-        title="Voice Move Complete",
-        description=f"Moved {len(moved_members)} user(s) from **{source_channel.name}** to **{channel.name}**.",
-        color=discord.Color.blurple()
-    )
-    if moved_members:
-        embed.add_field(name="Moved", value="\n".join(moved_members[:25]), inline=False)
-    if failed_members:
-        embed.add_field(name="Failed", value="\n".join(failed_members[:25]), inline=False)
-    embed.set_footer(text=f"Requested by {interaction.user}", icon_url=interaction.user.display_avatar.url)
-
-    await interaction.response.send_message(embed=embed)
-
 
 @bot.tree.command(name="translate", description="Translate text into another language")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -1225,20 +1297,6 @@ async def translate(interaction: discord.Interaction, text: str, to_language: st
     except Exception as e:
         await interaction.followup.send(f"❌ Translation failed. Please ensure you used valid ISO language codes! Error: {e}", ephemeral=True)
 
-
-YTDL_OPTIONS = {
-    'format': 'bestaudio/best',
-    'noplaylist': True,
-    'quiet': True,
-    'no_warnings': True,
-    'default_search': 'auto',
-    'source_address': '0.0.0.0'
-}
-
-FFMPEG_OPTIONS = {
-    'before_options': '-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5',
-    'options': '-vn'
-}
 
 @bot.tree.command(name="voice-play", description="Connect to your voice channel and play a YouTube audio link")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -1286,432 +1344,6 @@ async def voice_leave(interaction: discord.Interaction):
         await interaction.response.send_message("❌ I'm not connected to a voice channel!", ephemeral=True)
 
 
-@bot.tree.command(name="counter-channel-set", description="Enable counting in a channel and optionally reset on fail")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    channel="The text channel where counting will happen",
-    reset_when_fail="If enabled, the current counter resets when someone fails"
-)
-async def counter_channel_set(interaction: discord.Interaction, channel: discord.TextChannel, reset_when_fail: bool = False):
-    set_counter_channel(str(interaction.guild.id), channel.id, reset_when_fail)
-    status_text = "resets on fail" if reset_when_fail else "does not reset on fail"
-    await interaction.response.send_message(f"✅ Counter enabled in {channel.mention} and {status_text}.", ephemeral=False)
-
-
-@bot.tree.command(name="counter-del", description="Disable counting in a channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    channel="The channel where counting should be disabled"
-)
-async def counter_del(interaction: discord.Interaction, channel: discord.TextChannel):
-    removed = remove_counter_channel(str(interaction.guild.id), channel.id)
-    if removed:
-        await interaction.response.send_message(f"✅ Counter disabled in {channel.mention}.", ephemeral=False)
-    else:
-        await interaction.response.send_message(f"⚠️ That channel does not have an active counter.", ephemeral=True)
-
-
-@bot.tree.command(name="counter-number-set", description="Set the current count in a counter channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    channel="The counter channel to update",
-    value="The new current count value"
-)
-async def counter_number_set(interaction: discord.Interaction, channel: discord.TextChannel, value: int):
-    success = set_counter_value(str(interaction.guild.id), channel.id, value)
-    if success:
-        await interaction.response.send_message(f"✅ Counter in {channel.mention} is now set to {value}.", ephemeral=False)
-    else:
-        await interaction.response.send_message(f"⚠️ That channel does not have an active counter.", ephemeral=True)
-
-
-@bot.tree.command(name="board-add", description="Set up a reaction board for an emoji")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    emoji="The emoji to watch for (standard or custom)",
-    required_count="Number of reactions needed to post to the board",
-    channel="The channel where board messages will be sent"
-)
-async def board_add(interaction: discord.Interaction, emoji: str, required_count: int, channel: discord.TextChannel):
-    guild_id = str(interaction.guild.id)
-    board_data = load_board_data()
-    if guild_id not in board_data:
-        board_data[guild_id] = {}
-    board_data[guild_id][emoji] = {
-        "channel_id": channel.id,
-        "required_count": required_count,
-        "tracked_messages": {}
-    }
-    save_board_data(board_data)
-    embed = discord.Embed(
-        title="📋 Board Configured!",
-        description=f"When a message gets {required_count} {emoji} reactions, it will be sent to {channel.mention}.",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed)
-
-@bot.tree.command(name="board-del", description="Delete a reaction board configuration")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(emoji="The emoji board you want to remove")
-async def board_del(interaction: discord.Interaction, emoji: str):
-    guild_id = str(interaction.guild.id)
-    board_data = load_board_data()
-    if guild_id in board_data and emoji in board_data[guild_id]:
-        del board_data[guild_id][emoji]
-        if not board_data[guild_id]:
-            del board_data[guild_id]
-        save_board_data(board_data)
-        await interaction.response.send_message(f"🗑️ Successfully removed the board for {emoji}.")
-    else:
-        await interaction.response.send_message(f"❌ No board configuration found for {emoji} in this server.", ephemeral=True)
-
-
-@bot.tree.command(name="auto-reply", description="Add a trigger word and random responses for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    word="The word that triggers the bot",
-    reply1="Mandatory first response",
-    reply2="Optional second response",
-    reply3="Optional third response",
-    reply4="Optional fourth response"
-)
-async def auto_reply(interaction: discord.Interaction, word: str, reply1: str, reply2: str = None, reply3: str = None, reply4: str = None):
-    guild_id = str(interaction.guild.id)
-    trigger_word = word.lower()
-    replies = [r for r in [reply1, reply2, reply3, reply4] if r is not None]
-    fun_data = load_fun_data()
-    if guild_id not in fun_data:
-        fun_data[guild_id] = {}
-    fun_data[guild_id][trigger_word] = replies
-    save_fun_data(fun_data)
-    embed = discord.Embed(
-        title="✨ Fun Reply Added!",
-        description=f"Whenever someone says **{word}** in this server, I will randomly reply with one of these:",
-        color=discord.Color.purple()
-    )
-    for i, r in enumerate(replies, 1):
-        embed.add_field(name=f"Reply {i}", value=r, inline=False)
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="auto-reply-clear", description="Remove a trigger word from this server's fun system")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(word="The trigger word you want to delete")
-async def auto_reply_clear(interaction: discord.Interaction, word: str):
-    guild_id = str(interaction.guild.id)
-    trigger_word = word.lower()
-    fun_data = load_fun_data()
-    if guild_id in fun_data and trigger_word in fun_data[guild_id]:
-        del fun_data[guild_id][trigger_word]
-        if not fun_data[guild_id]:
-            del fun_data[guild_id]
-        save_fun_data(fun_data)
-        embed = discord.Embed(
-            title="🗑️ Trigger Cleared",
-            description=f"Successfully removed the word **{word}** from this server's auto-reply system.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.response.send_message(f"❌ '{word}' isn't registered as a fun reply trigger in this server.", ephemeral=True)
-
-@bot.tree.command(name="own-shutdown", description="(owner) Stop the bot for an update or just to restart")
-@app_commands.describe(
-    channel="Optional announcement channel to send the shutdown message to",
-    reason="The shutdown reason to publish"
-)
-async def own_shutdown(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel = None,
-    reason: str = "No reason provided"
-):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("❌ Do not even try...", ephemeral=True)
-
-    target_channel = channel or bot.get_channel(1514173159052415026)
-    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
-        target_channel = interaction.channel
-
-    shutdown_text = (
-        f"🔌 {reason}"
-    )
-    shutdown_embed = discord.Embed(
-        title="Bot Shutdown Initiated",
-        description=shutdown_text,
-        color=discord.Color.light_gray()
-    )
-
-    published = False
-    if target_channel is not None:
-        try:
-            sent_msg = await target_channel.send(embed=shutdown_embed)
-            if target_channel.type == discord.ChannelType.news:
-                try:
-                    await sent_msg.publish()
-                    published = True
-                except Exception:
-                    published = False
-        except Exception as e:
-            await interaction.response.send_message(
-                f"❌ Could not send the shutdown notice to {target_channel.mention}. Error: {e}",
-                ephemeral=True
-            )
-            return
-
-    if update_presence.is_running():
-        update_presence.cancel()
-        await asyncio.sleep(1)
-
-    response_text = "Going to sleep..."
-    if target_channel is not None:
-        response_text = (
-            f"Shutdown notice sent to {target_channel.mention}. "
-            + ("Published to followers." if published else "")
-        )
-
-    await interaction.response.send_message(response_text)
-
-    shutdown_activity = discord.Activity(type=discord.ActivityType.watching, name="App is shutting down!!! !! !")
-    sleep_activity = discord.Activity(type=discord.ActivityType.watching, name="App is sleeping... zZzZzZ")
-    for shard_id in bot.shards:
-        await bot.change_presence(activity=shutdown_activity, status=discord.Status.dnd, shard_id=shard_id)
-    await asyncio.sleep(10)
-    for shard_id in bot.shards:
-        await bot.change_presence(activity=sleep_activity, status=discord.Status.idle, shard_id=shard_id)
-    await bot.close()
-
-
-@bot.tree.command(name="own-stop-urgent", description="(owner) STOPS IMMEDIATLY IF SOMETHING WENT REALLY WRONG")
-@app_commands.describe(channel="Optional announcement channel to send the force shutdown message to")
-async def own_stop_urgent(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("❌ Stop.", ephemeral=True)
-
-    target_channel = channel or bot.get_channel(1514173159052415026)
-    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
-        target_channel = interaction.channel
-
-    force_text = "⚠️ The bot is going offline immediately due to an urgent issue."
-    force_embed = discord.Embed(
-        title="Force Shutdown",
-        description=force_text,
-        color=discord.Color.red()
-    )
-
-    if target_channel is not None:
-        try:
-            sent_msg = await target_channel.send(embed=force_embed)
-            if target_channel.type == discord.ChannelType.news:
-                try:
-                    await sent_msg.publish()
-                except Exception:
-                    pass
-        except Exception:
-            pass
-
-    if update_presence.is_running():
-        update_presence.cancel()
-    await interaction.response.send_message("Goodbye.")
-    forced_activity = discord.Activity(type=discord.ActivityType.watching, name="App was shutdown forcefully...")
-    for shard_id in bot.shards:
-        await bot.change_presence(activity=forced_activity, status=discord.Status.dnd, shard_id=shard_id)
-    await bot.close()
-
-
-@bot.tree.command(name="adm-rename", description="Rename a user or reset their nickname")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_nicknames=True)
-@app_commands.describe(
-    user="The member you want to rename",
-    name="The new nickname (leave empty to reset to original name)"
-)
-async def rename(interaction: discord.Interaction, user: discord.Member, name: str = None):
-    if interaction.guild.me.top_role <= user.top_role:
-        await interaction.response.send_message("❌ I cannot rename this user. Their role is higher than or equal to mine!", ephemeral=True)
-        return
-    try:
-        old_name = user.display_name
-        await user.edit(nick=name)
-        if name:
-            await interaction.response.send_message(f"✅ Changed **{old_name}**'s nickname to **{name}**.")
-        else:
-            await interaction.response.send_message(f"✅ Reset **{old_name}**'s nickname to their original username.")
-    except discord.Forbidden:
-        await interaction.response.send_message("❌ I don't have the 'Manage Nicknames' permission or the user is the Server Owner.", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
-
-@bot.tree.command(name="adm-purge-nuke", description="Fully clear a channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_channels=True)
-async def nuke(interaction: discord.Interaction, archive: bool = False):
-    try:
-        channel = await interaction.guild.fetch_channel(interaction.channel_id)
-    except discord.Forbidden:
-        await interaction.response.send_message("❌ I cannot 'see' this channel. Please check my permissions in this specific channel's settings.", ephemeral=True)
-        return
-
-    GIF_URL = "https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExN2x1ZW82ZGdlZzV1MTFzNGF6ajJzZ3Bmc3I2MDlxaXp0cWpkcTY4YyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/fXhYwggfsp3yHBsdlr/giphy.gif"
-
-    await interaction.response.send_message("💣 Target locked. Nuking...", ephemeral=False)
-    new_channel = await channel.clone(reason=f"Nuke by {interaction.user}")
-    await new_channel.edit(position=channel.position)
-
-    embed = discord.Embed(
-        title="☢️ Channel Nuked",
-        description=f"This is {interaction.user.mention}'s fault, THEY DID THIS",
-        color=discord.Color.red()
-    )
-    embed.set_image(url=GIF_URL)
-    await new_channel.send(embed=embed)
-
-    try:
-        if archive:
-            everyone_role = interaction.guild.default_role
-            await channel.edit(
-                name=f"{channel.name}-archived",
-                overwrites={everyone_role: discord.PermissionOverwrite(view_channel=False)},
-                reason="Channel Archived via Nuke"
-            )
-        else:
-            await channel.delete(reason="Nuked")
-    except discord.Forbidden:
-        await new_channel.send("⚠️ **Warning:** I couldn't delete or hide the old channel. Check if my role is high enough!")
-    except Exception as e:
-        print(f"Error during nuke cleanup: {e}")
-
-
-@bot.tree.command(name="adm-purge", description="Mass delete messages from the channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_messages=True)
-@app_commands.describe(
-    amount="Number of messages to delete",
-    user="Optional: Only delete messages from this specific user"
-)
-async def purge(interaction: discord.Interaction, amount: int, user: discord.Member = None):
-    if amount <= 0:
-        await interaction.response.send_message("❌ Please specify a number greater than 0.", ephemeral=True)
-        return
-    if amount > 100:
-        await interaction.response.send_message("⚠️ For safety, you can only purge up to 100 messages at a time.", ephemeral=True)
-        return
-
-    await interaction.response.defer(ephemeral=False)
-
-    def is_user(m):
-        return m.author == user if user else True
-
-    try:
-        deleted = await interaction.channel.purge(limit=amount, check=is_user, before=interaction.created_at)
-        user_str = f" from {user.mention}" if user else ""
-        await interaction.followup.send(f"💣 Successfully deleted **{len(deleted)}** messages{user_str}.", ephemeral=False)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Failed to purge messages. Error: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="adm-timeout", description="Timeout a member for a specific duration")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(moderate_members=True)
-@app_commands.describe(
-    member="The member to timeout",
-    days="Number of days",
-    hours="Number of hours",
-    minutes="Number of minutes",
-    seconds="Number of seconds",
-    reason="Why is this user being timed out?"
-)
-async def timeout(interaction: discord.Interaction, member: discord.Member, days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0, reason: str = "No reason provided"):
-    duration = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
-    if duration.total_seconds() <= 0:
-        await interaction.response.send_message("❌ You must specify a duration greater than 0!", ephemeral=True)
-        return
-    if duration.total_seconds() > 2419200:
-        await interaction.response.send_message("❌ Timeout cannot exceed 28 days.", ephemeral=True)
-        return
-
-    if interaction.user != member and member.top_role >= interaction.user.top_role:
-        await interaction.response.send_message("❌ You cannot timeout someone with an equal or higher role than yours.", ephemeral=True)
-        return
-
-    time_str = f"{days}d {hours}h {minutes}m {seconds}s"
-    try:
-        dm_embed = discord.Embed(
-            title="⏳ You have been timed out",
-            description=f"**Server:** {interaction.guild.name}\n**Duration:** {time_str}\n**Reason:** {reason}",
-            color=discord.Color.orange()
-        )
-        await member.send(embed=dm_embed)
-    except discord.Forbidden:
-        pass
-
-    try:
-        await member.timeout(duration, reason=reason)
-        confirm_embed = discord.Embed(
-            title="✅ User Timed Out",
-            description=f"**{member.mention}** has been timed out for {time_str}.",
-            color=discord.Color.green()
-        )
-        confirm_embed.add_field(name="Reason", value=reason)
-        await interaction.response.send_message(embed=confirm_embed)
-    except discord.Forbidden:
-        await interaction.response.send_message("❌ I don't have permission to timeout this user (Hierarchy issue).", ephemeral=True)
-    except Exception as e:
-        await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
-
-
-@bot.tree.command(name="toggle-ghost-pings", description="Enable or disable ghost ping notifications in this guild")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def ghost_toggle(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    guild_config, data = get_guild_config(guild_id)
-    
-    current_state = guild_config.get("ghost_ping_enabled", False)
-    new_state = not current_state
-    guild_config["ghost_ping_enabled"] = new_state
-    
-    save_guild_data(data)
-    
-    status_text = "✅ **Enabled**" if new_state else "❌ **Disabled**"
-    embed = discord.Embed(
-        title="👻 Ghost Ping Notifications",
-        description=f"Ghost ping notifications are now {status_text}",
-        color=discord.Color.green() if new_state else discord.Color.red()
-    )
-    embed.set_footer(text="When enabled, the bot will notify users if someone pings them and then deletes the message (ghost ping).")
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-    print(f"👻 Ghost ping notifications {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
-
-
-@bot.tree.command(name="toggle-history", description="Enable or disable /edited and /deleted history in this guild")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def history_toggle(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    guild_config, data = get_guild_config(guild_id)
-
-    current_state = guild_config.get("edit_delete_history_enabled", True)
-    new_state = not current_state
-    guild_config["edit_delete_history_enabled"] = new_state
-    save_guild_data(data)
-
-    status_text = "✅ **Enabled**" if new_state else "❌ **Disabled**"
-    embed = discord.Embed(
-        title="🗄️ Edit/Delete History",
-        description=f"Edited and deleted message history is now {status_text} for this server.",
-        color=discord.Color.green() if new_state else discord.Color.red()
-    )
-    embed.set_footer(text="When disabled, /edited and /deleted commands will not show history and deleted/edited events will not be saved.")
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-    print(f"🗄️ Edit/Delete history {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
-
 @bot.tree.command(name="version", description="Display the bot's version")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -1720,12 +1352,14 @@ async def ver(interaction: discord.Interaction):
     ACTIVITY_TEXT = os.getenv('ACTIVITY')
     await interaction.response.send_message(f"⚙️ Current version: {VERSION} | {ACTIVITY_TEXT}")
 
+
 @bot.tree.command(name="roll", description="Roll a 6-sided die")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
 async def roll(interaction: discord.Interaction):
     result = random.randint(1, 6)
     await interaction.response.send_message(f"🎲 You rolled a **{result}**!")
+
 
 @bot.tree.command(name="random", description="Pick a random number between two values")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -1852,6 +1486,7 @@ class CustomEmbedModal(Modal):
 
         await interaction.response.send_message(embed=embed)
 
+
 @bot.tree.command(name="embed", description="Create a fully-loaded customized embed message using a styling menu")
 @app_commands.describe(
     color="Choose a preset theme color for the embed accent line",
@@ -1899,6 +1534,7 @@ async def embed_builder(
     )
     await interaction.response.send_modal(modal)
 
+
 @bot.tree.context_menu(name="Rizz Meter")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -1906,6 +1542,7 @@ async def rizz_menu(interaction: discord.Interaction, message: discord.Message):
     percentage = random.randint(0, 100)
     original_text = message.content if message.content else "*[Media or Embed]*"
     await interaction.response.send_message(f"> This message has **{percentage}%** Rizz.\n-# **{message.author.display_name}:** {original_text}")
+
 
 @bot.tree.context_menu(name="Cringe Meter")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -1915,6 +1552,7 @@ async def cringe_menu(interaction: discord.Interaction, message: discord.Message
     original_text = message.content if message.content else "*[Media or Embed]*"
     await interaction.response.send_message(f"> This message is **{percentage}%** Cringe.\n-# **{message.author.display_name}:** {original_text}")
 
+
 @bot.tree.context_menu(name="Stupid Meter")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -1922,6 +1560,7 @@ async def stupid_menu(interaction: discord.Interaction, message: discord.Message
     percentage = random.randint(0, 100)
     original_text = message.content if message.content else "*[Media or Embed]*"
     await interaction.response.send_message(f"> This message is **{percentage}%** Stupid.\n-# **{message.author.display_name}:** {original_text}")
+
 
 @bot.tree.context_menu(name="Lie Meter")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -1956,109 +1595,6 @@ async def love(interaction: discord.Interaction, item1: str, item2: str):
     embed.add_field(name="Compatibility", value=f"**{score}%**\n{bar}", inline=False)
     await interaction.response.send_message(embed=embed)
 
-
-@bot.tree.command(name="deleted", description="View recently deleted messages and media")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def deleted(interaction: discord.Interaction, user: discord.Member = None):
-    clean_cache()
-    guild_config, _ = get_guild_config(str(interaction.guild.id))
-    if not guild_config.get("edit_delete_history_enabled", True):
-        await interaction.response.send_message("❌ Deleted message history is disabled for this server.")
-        return
-    channel_msgs = [m for m in deleted_cache if m['channel'] == interaction.channel_id]
-    if user:
-        channel_msgs = [m for m in channel_msgs if m['author'].id == user.id]
-    if not channel_msgs:
-        await interaction.response.send_message("No deleted messages found in this channel recently.")
-        return
-
-    description_lines = []
-    media_only_messages = []
-
-    for m in channel_msgs:
-        media_indicator = "🖼️ " if m['media'] else ""
-        if m['media']:
-            media_only_messages.append(m)
-        content_text = m['content'] if m['content'] else "*[Media or Embed]*"
-        description_lines.append(f"{media_indicator}**{m['author'].display_name}**: {content_text}\n-# Sent at {m['created_at']}")
-
-    full_description = "\n\n".join(description_lines)
-    main_embed = discord.Embed(
-        title="🗑️ Recent deleted messages:",
-        description=full_description,
-        color=discord.Color.red()
-    )
-
-    if media_only_messages:
-        media_only_messages.sort(key=lambda x: x['time'], reverse=True)
-        view = DeletedMediaView(media_only_messages, interaction.user)
-        view.main_text_layout = "Recent deleted messages:"
-        view.main_embed_layout = main_embed
-        await interaction.response.send_message(embed=main_embed, view=view)
-        view.message = await interaction.original_response()
-    else:
-        await interaction.response.send_message(embed=main_embed)
-
-@bot.tree.command(name="edited", description="Show recently edited messages in this channel")
-@app_commands.describe(user="Optional: Only show edited messages from a specific user")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def edited_command(interaction: discord.Interaction, user: discord.Member = None):
-    global edited_cache
-    clean_cache()
-    guild_config, _ = get_guild_config(str(interaction.guild.id))
-    if not guild_config.get("edit_delete_history_enabled", True):
-        await interaction.response.send_message("❌ Edited message history is disabled for this server.")
-        return
-
-    channel_edited = [m for m in edited_cache if m['channel'] == interaction.channel_id]
-
-    if user:
-        channel_edited = [m for m in channel_edited if m['author_id'] == user.id]
-
-    if not channel_edited:
-        await interaction.response.send_message("No messages have been edited in this channel recently.")
-        return
-
-    text_layout = ""
-    for msg in channel_edited[:7]:
-        text_layout += f"**{msg['author'].display_name}**: ~~{msg['old_content']}~~ ➔ {msg['new_content']}\n-# Edited at {msg['edited_at']} | [Jump to Message]({msg['jump_url']})\n\n"
-
-    title_text = "📝 Recently Edited Messages"
-
-    embed_layout = discord.Embed(
-        title=title_text,
-        description=text_layout,
-        color=discord.Color.orange()
-    )
-
-    await interaction.response.send_message(embed=embed_layout)
-
-@bot.tree.command(name="forget", description="Clear your messages from the bot's memory")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
-async def forget(interaction: discord.Interaction):
-    clean_cache()
-    global message_cache, deleted_cache, edited_cache
-    
-    message_cache = [m for m in message_cache if m['author'].id != interaction.user.id]
-    deleted_cache = [m for m in deleted_cache if m['author'].id != interaction.user.id]
-    edited_cache = [m for m in edited_cache if m['author'].id != interaction.user.id]
-    
-    await interaction.response.send_message("I've wiped your messages, edits, and media from my memory!", ephemeral=True)
-
-@bot.tree.command(name="adm-forget", description="Clear edited and deleted history of a chosen user")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
-@app_commands.default_permissions(manage_messages=True)
-async def adm_forget(interaction: discord.Interaction, user: discord.Member):
-    clean_cache()
-    global message_cache, deleted_cache, edited_cache
-    message_cache = [m for m in message_cache if m['author'].id != user.id]
-    deleted_cache = [m for m in deleted_cache if m['author'].id != user.id]
-    edited_cache = [m for m in edited_cache if m['author'].id != user.id]
-    await interaction.response.send_message(
-        f"Cleared deleted and edited history for {user.display_name}."
-    )
 
 @bot.tree.command(name="ping", description="Check the bot's latency to Discord")
 @app_commands.allowed_installs(guilds=True, users=True)
@@ -2112,6 +1648,7 @@ async def slot(interaction: discord.Interaction):
         result_msg = f"🎰 Slot Machine:\n\n| {final_e1} | {final_e2} | {final_e3} |\n\nBetter luck next time!"
     await interaction.edit_original_response(content=result_msg)
 
+
 @bot.tree.command(name="coinflip-classic", description="Flips a coin and shows Heads or Tails")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -2145,6 +1682,7 @@ async def banner(interaction: discord.Interaction, user: discord.Member = None):
     else:
         await interaction.response.send_message(f"{user.name} does not have a banner.", ephemeral=True)
 
+
 @bot.tree.command(name="emoji", description="Get the image for a custom emoji")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -2162,7 +1700,784 @@ async def emoji(interaction: discord.Interaction, emoji: str):
     embed.set_image(url=emoji_obj.url)
     await interaction.response.send_message(embed=embed)
 
-# --- Economy Commands ---
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Admin Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="adm-voice-move", description="Move everyone in your current voice channel to another voice channel")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(move_members=True)
+@app_commands.describe(
+    channel="Target voice channel to move everyone into"
+)
+async def adm_voice_move(interaction: discord.Interaction, channel: discord.VoiceChannel):
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        member = interaction.guild.get_member(interaction.user.id)
+
+    if not member or not member.voice or not member.voice.channel:
+        await interaction.response.send_message("❌ You must be connected to a voice channel to use this command.", ephemeral=True)
+        return
+
+    source_channel = member.voice.channel
+    if source_channel.id == channel.id:
+        await interaction.response.send_message("✅ You are already in the target voice channel.", ephemeral=True)
+        return
+
+    moved_members = []
+    failed_members = []
+    for target_member in list(source_channel.members):
+        try:
+            await target_member.move_to(channel, reason=f"Voice move initiated by {interaction.user}")
+            moved_members.append(target_member.display_name)
+        except Exception as e:
+            failed_members.append(f"{target_member.display_name}: {e}")
+
+    embed = discord.Embed(
+        title="Voice Move Complete",
+        description=f"Moved {len(moved_members)} user(s) from **{source_channel.name}** to **{channel.name}**.",
+        color=discord.Color.blurple()
+    )
+    if moved_members:
+        embed.add_field(name="Moved", value="\n".join(moved_members[:25]), inline=False)
+    if failed_members:
+        embed.add_field(name="Failed", value="\n".join(failed_members[:25]), inline=False)
+    embed.set_footer(text=f"Requested by {interaction.user}", icon_url=interaction.user.display_avatar.url)
+
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="adm-rename", description="Rename a user or reset their nickname")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_nicknames=True)
+@app_commands.describe(
+    user="The member you want to rename",
+    name="The new nickname (leave empty to reset to original name)"
+)
+async def rename(interaction: discord.Interaction, user: discord.Member, name: str = None):
+    if interaction.guild.me.top_role <= user.top_role:
+        await interaction.response.send_message("❌ I cannot rename this user. Their role is higher than or equal to mine!", ephemeral=True)
+        return
+    try:
+        old_name = user.display_name
+        await user.edit(nick=name)
+        if name:
+            await interaction.response.send_message(f"✅ Changed **{old_name}**'s nickname to **{name}**.")
+        else:
+            await interaction.response.send_message(f"✅ Reset **{old_name}**'s nickname to their original username.")
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have the 'Manage Nicknames' permission or the user is the Server Owner.", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="adm-purge-nuke", description="Fully clear a channel")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_channels=True)
+async def nuke(interaction: discord.Interaction, archive: bool = False):
+    try:
+        channel = await interaction.guild.fetch_channel(interaction.channel_id)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I cannot 'see' this channel. Please check my permissions in this specific channel's settings.", ephemeral=True)
+        return
+
+    GIF_URL = "https://media0.giphy.com/media/v1.Y2lkPTc5MGI3NjExN2x1ZW82ZGdlZzV1MTFzNGF6ajJzZ3Bmc3I2MDlxaXp0cWpkcTY4YyZlcD12MV9pbnRlcm5hbF9naWZfYnlfaWQmY3Q9Zw/fXhYwggfsp3yHBsdlr/giphy.gif"
+
+    await interaction.response.send_message("💣 Target locked. Nuking...", ephemeral=False)
+    new_channel = await channel.clone(reason=f"Nuke by {interaction.user}")
+    await new_channel.edit(position=channel.position)
+
+    embed = discord.Embed(
+        title="☢️ Channel Nuked",
+        description=f"This is {interaction.user.mention}'s fault, THEY DID THIS",
+        color=discord.Color.red()
+    )
+    embed.set_image(url=GIF_URL)
+    await new_channel.send(embed=embed)
+
+    try:
+        if archive:
+            everyone_role = interaction.guild.default_role
+            await channel.edit(
+                name=f"{channel.name}-archived",
+                overwrites={everyone_role: discord.PermissionOverwrite(view_channel=False)},
+                reason="Channel Archived via Nuke"
+            )
+        else:
+            await channel.delete(reason="Nuked")
+    except discord.Forbidden:
+        await new_channel.send("⚠️ **Warning:** I couldn't delete or hide the old channel. Check if my role is high enough!")
+    except Exception as e:
+        print(f"Error during nuke cleanup: {e}")
+
+
+@bot.tree.command(name="adm-purge", description="Mass delete messages from the channel")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_messages=True)
+@app_commands.describe(
+    amount="Number of messages to delete",
+    user="Optional: Only delete messages from this specific user"
+)
+async def purge(interaction: discord.Interaction, amount: int, user: discord.Member = None):
+    if amount <= 0:
+        await interaction.response.send_message("❌ Please specify a number greater than 0.", ephemeral=True)
+        return
+    if amount > 100:
+        await interaction.response.send_message("⚠️ For safety, you can only purge up to 100 messages at a time.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    def is_user(m):
+        return m.author == user if user else True
+
+    try:
+        deleted = await interaction.channel.purge(limit=amount, check=is_user, before=interaction.created_at)
+        user_str = f" from {user.mention}" if user else ""
+        await interaction.followup.send(f"💣 Successfully deleted **{len(deleted)}** messages{user_str}.", ephemeral=False)
+    except Exception as e:
+        await interaction.followup.send(f"❌ Failed to purge messages. Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="adm-timeout", description="Timeout a member for a specific duration")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.describe(
+    member="The member to timeout",
+    days="Number of days",
+    hours="Number of hours",
+    minutes="Number of minutes",
+    seconds="Number of seconds",
+    reason="Why is this user being timed out?"
+)
+async def timeout(interaction: discord.Interaction, member: discord.Member, days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0, reason: str = "No reason provided"):
+    duration = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
+    if duration.total_seconds() <= 0:
+        await interaction.response.send_message("❌ You must specify a duration greater than 0!", ephemeral=True)
+        return
+    if duration.total_seconds() > 2419200:
+        await interaction.response.send_message("❌ Timeout cannot exceed 28 days.", ephemeral=True)
+        return
+
+    if interaction.user != member and member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("❌ You cannot timeout someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    time_str = f"{days}d {hours}h {minutes}m {seconds}s"
+    try:
+        dm_embed = discord.Embed(
+            title="⏳ You have been timed out",
+            description=f"**Server:** {interaction.guild.name}\n**Duration:** {time_str}\n**Reason:** {reason}",
+            color=discord.Color.orange()
+        )
+        await member.send(embed=dm_embed)
+    except discord.Forbidden:
+        pass
+
+    try:
+        await member.timeout(duration, reason=reason)
+        confirm_embed = discord.Embed(
+            title="✅ User Timed Out",
+            description=f"**{member.mention}** has been timed out for {time_str}.",
+            color=discord.Color.green()
+        )
+        confirm_embed.add_field(name="Reason", value=reason)
+        await interaction.response.send_message(embed=confirm_embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("❌ I don't have permission to timeout this user (Hierarchy issue).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"❌ An error occurred: {e}", ephemeral=True)
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Deleted Edited / Ghost Pings
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="toggle-ghost-pings", description="Enable or disable ghost ping notifications in this guild")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def ghost_toggle(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    guild_config, data = get_guild_config(guild_id)
+    
+    current_state = guild_config.get("ghost_ping_enabled", False)
+    new_state = not current_state
+    guild_config["ghost_ping_enabled"] = new_state
+    
+    save_guild_data(data)
+    
+    status_text = "✅ **Enabled**" if new_state else "❌ **Disabled**"
+    embed = discord.Embed(
+        title="👻 Ghost Ping Notifications",
+        description=f"Ghost ping notifications are now {status_text}",
+        color=discord.Color.green() if new_state else discord.Color.red()
+    )
+    embed.set_footer(text="When enabled, the bot will notify users if someone pings them and then deletes the message (ghost ping).")
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+    print(f"👻 Ghost ping notifications {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
+
+
+@bot.tree.command(name="toggle-history", description="Enable or disable /edited and /deleted history in this guild")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def history_toggle(interaction: discord.Interaction):
+    guild_id = str(interaction.guild.id)
+    guild_config, data = get_guild_config(guild_id)
+
+    current_state = guild_config.get("edit_delete_history_enabled", True)
+    new_state = not current_state
+    guild_config["edit_delete_history_enabled"] = new_state
+    save_guild_data(data)
+
+    status_text = "✅ **Enabled**" if new_state else "❌ **Disabled**"
+    embed = discord.Embed(
+        title="🗄️ Edit/Delete History",
+        description=f"Edited and deleted message history is now {status_text} for this server.",
+        color=discord.Color.green() if new_state else discord.Color.red()
+    )
+    embed.set_footer(text="When disabled, /edited and /deleted commands will not show history and deleted/edited events will not be saved.")
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+    print(f"🗄️ Edit/Delete history {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
+
+
+@bot.tree.command(name="deleted", description="View recently deleted messages and media")
+@app_commands.allowed_installs(guilds=True, users=False)
+async def deleted(interaction: discord.Interaction, user: discord.Member = None):
+    clean_cache()
+    guild_config, _ = get_guild_config(str(interaction.guild.id))
+    if not guild_config.get("edit_delete_history_enabled", True):
+        await interaction.response.send_message("❌ Deleted message history is disabled for this server.")
+        return
+    channel_msgs = [m for m in deleted_cache if m['channel'] == interaction.channel_id]
+    if user:
+        channel_msgs = [m for m in channel_msgs if m['author'].id == user.id]
+    if not channel_msgs:
+        await interaction.response.send_message("No deleted messages found in this channel recently.")
+        return
+
+    description_lines = []
+    media_only_messages = []
+
+    for m in channel_msgs:
+        media_indicator = "🖼️ " if m['media'] else ""
+        if m['media']:
+            media_only_messages.append(m)
+        content_text = m['content'] if m['content'] else "*[Media or Embed]*"
+        description_lines.append(f"{media_indicator}**{m['author'].display_name}**: {content_text}\n-# Sent at {m['created_at']}")
+
+    full_description = "\n\n".join(description_lines)
+    main_embed = discord.Embed(
+        title="🗑️ Recent deleted messages:",
+        description=full_description,
+        color=discord.Color.red()
+    )
+
+    if media_only_messages:
+        media_only_messages.sort(key=lambda x: x['time'], reverse=True)
+        view = DeletedMediaView(media_only_messages, interaction.user)
+        view.main_text_layout = "Recent deleted messages:"
+        view.main_embed_layout = main_embed
+        await interaction.response.send_message(embed=main_embed, view=view)
+        view.message = await interaction.original_response()
+    else:
+        await interaction.response.send_message(embed=main_embed)
+
+
+@bot.tree.command(name="edited", description="Show recently edited messages in this channel")
+@app_commands.describe(user="Optional: Only show edited messages from a specific user")
+@app_commands.allowed_installs(guilds=True, users=False)
+async def edited_command(interaction: discord.Interaction, user: discord.Member = None):
+    global edited_cache
+    clean_cache()
+    guild_config, _ = get_guild_config(str(interaction.guild.id))
+    if not guild_config.get("edit_delete_history_enabled", True):
+        await interaction.response.send_message("❌ Edited message history is disabled for this server.")
+        return
+
+    channel_edited = [m for m in edited_cache if m['channel'] == interaction.channel_id]
+
+    if user:
+        channel_edited = [m for m in channel_edited if m['author_id'] == user.id]
+
+    if not channel_edited:
+        await interaction.response.send_message("No messages have been edited in this channel recently.")
+        return
+
+    text_layout = ""
+    for msg in channel_edited[:7]:
+        text_layout += f"**{msg['author'].display_name}**: ~~{msg['old_content']}~~ ➔ {msg['new_content']}\n-# Edited at {msg['edited_at']} | [Jump to Message]({msg['jump_url']})\n\n"
+
+    title_text = "📝 Recently Edited Messages"
+
+    embed_layout = discord.Embed(
+        title=title_text,
+        description=text_layout,
+        color=discord.Color.orange()
+    )
+
+    await interaction.response.send_message(embed=embed_layout)
+
+
+@bot.tree.command(name="forget", description="Clear your messages from the bot's memory")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
+async def forget(interaction: discord.Interaction):
+    clean_cache()
+    global message_cache, deleted_cache, edited_cache
+    
+    message_cache = [m for m in message_cache if m['author'].id != interaction.user.id]
+    deleted_cache = [m for m in deleted_cache if m['author'].id != interaction.user.id]
+    edited_cache = [m for m in edited_cache if m['author'].id != interaction.user.id]
+    
+    await interaction.response.send_message("I've wiped your messages, edits, and media from my memory!", ephemeral=True)
+
+
+@bot.tree.command(name="adm-forget", description="Clear edited and deleted history of a chosen user")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
+@app_commands.default_permissions(manage_messages=True)
+async def adm_forget(interaction: discord.Interaction, user: discord.Member):
+    clean_cache()
+    global message_cache, deleted_cache, edited_cache
+    message_cache = [m for m in message_cache if m['author'].id != user.id]
+    deleted_cache = [m for m in deleted_cache if m['author'].id != user.id]
+    edited_cache = [m for m in edited_cache if m['author'].id != user.id]
+    await interaction.response.send_message(
+        f"Cleared deleted and edited history for {user.display_name}."
+    )
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Counter And Reply Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="counter-channel-set", description="Enable counting in a channel and optionally reset on fail")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    channel="The text channel where counting will happen",
+    reset_when_fail="If enabled, the current counter resets when someone fails"
+)
+async def counter_channel_set(interaction: discord.Interaction, channel: discord.TextChannel, reset_when_fail: bool = False):
+    set_counter_channel(str(interaction.guild.id), channel.id, reset_when_fail)
+    status_text = "resets on fail" if reset_when_fail else "does not reset on fail"
+    await interaction.response.send_message(f"✅ Counter enabled in {channel.mention} and {status_text}.", ephemeral=False)
+
+
+@bot.tree.command(name="counter-del", description="Disable counting in a channel")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    channel="The channel where counting should be disabled"
+)
+async def counter_del(interaction: discord.Interaction, channel: discord.TextChannel):
+    removed = remove_counter_channel(str(interaction.guild.id), channel.id)
+    if removed:
+        await interaction.response.send_message(f"✅ Counter disabled in {channel.mention}.", ephemeral=False)
+    else:
+        await interaction.response.send_message(f"⚠️ That channel does not have an active counter.", ephemeral=True)
+
+
+@bot.tree.command(name="counter-number-set", description="Set the current count in a counter channel")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    channel="The counter channel to update",
+    value="The new current count value"
+)
+async def counter_number_set(interaction: discord.Interaction, channel: discord.TextChannel, value: int):
+    success = set_counter_value(str(interaction.guild.id), channel.id, value)
+    if success:
+        await interaction.response.send_message(f"✅ Counter in {channel.mention} is now set to {value}.", ephemeral=False)
+    else:
+        await interaction.response.send_message(f"⚠️ That channel does not have an active counter.", ephemeral=True)
+
+
+@bot.tree.command(name="auto-reply", description="Add a trigger word and random responses for this server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    word="The word that triggers the bot",
+    reply1="Mandatory first response",
+    reply2="Optional second response",
+    reply3="Optional third response",
+    reply4="Optional fourth response"
+)
+async def auto_reply(interaction: discord.Interaction, word: str, reply1: str, reply2: str = None, reply3: str = None, reply4: str = None):
+    guild_id = str(interaction.guild.id)
+    trigger_word = word.lower()
+    replies = [r for r in [reply1, reply2, reply3, reply4] if r is not None]
+    fun_data = load_fun_data()
+    if guild_id not in fun_data:
+        fun_data[guild_id] = {}
+    fun_data[guild_id][trigger_word] = replies
+    save_fun_data(fun_data)
+    embed = discord.Embed(
+        title="✨ Fun Reply Added!",
+        description=f"Whenever someone says **{word}** in this server, I will randomly reply with one of these:",
+        color=discord.Color.purple()
+    )
+    for i, r in enumerate(replies, 1):
+        embed.add_field(name=f"Reply {i}", value=r, inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="auto-reply-clear", description="Remove a trigger word from this server's fun system")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(word="The trigger word you want to delete")
+async def auto_reply_clear(interaction: discord.Interaction, word: str):
+    guild_id = str(interaction.guild.id)
+    trigger_word = word.lower()
+    fun_data = load_fun_data()
+    if guild_id in fun_data and trigger_word in fun_data[guild_id]:
+        del fun_data[guild_id][trigger_word]
+        if not fun_data[guild_id]:
+            del fun_data[guild_id]
+        save_fun_data(fun_data)
+        embed = discord.Embed(
+            title="🗑️ Trigger Cleared",
+            description=f"Successfully removed the word **{word}** from this server's auto-reply system.",
+            color=discord.Color.red()
+        )
+        await interaction.response.send_message(embed=embed)
+    else:
+        await interaction.response.send_message(f"❌ '{word}' isn't registered as a fun reply trigger in this server.", ephemeral=True)
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Board Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="board-add", description="Set up a reaction board for an emoji")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    emoji="The emoji to watch for (standard or custom)",
+    required_count="Number of reactions needed to post to the board",
+    channel="The channel where board messages will be sent"
+)
+async def board_add(interaction: discord.Interaction, emoji: str, required_count: int, channel: discord.TextChannel):
+    guild_id = str(interaction.guild.id)
+    board_data = load_board_data()
+    if guild_id not in board_data:
+        board_data[guild_id] = {}
+    board_data[guild_id][emoji] = {
+        "channel_id": channel.id,
+        "required_count": required_count,
+        "tracked_messages": {}
+    }
+    save_board_data(board_data)
+    embed = discord.Embed(
+        title="📋 Board Configured!",
+        description=f"When a message gets {required_count} {emoji} reactions, it will be sent to {channel.mention}.",
+        color=discord.Color.green()
+    )
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="board-del", description="Delete a reaction board configuration")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(emoji="The emoji board you want to remove")
+async def board_del(interaction: discord.Interaction, emoji: str):
+    guild_id = str(interaction.guild.id)
+    board_data = load_board_data()
+    if guild_id in board_data and emoji in board_data[guild_id]:
+        del board_data[guild_id][emoji]
+        if not board_data[guild_id]:
+            del board_data[guild_id]
+        save_board_data(board_data)
+        await interaction.response.send_message(f"🗑️ Successfully removed the board for {emoji}.")
+    else:
+        await interaction.response.send_message(f"❌ No board configuration found for {emoji} in this server.", ephemeral=True)
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Lock Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.event
+async def on_guild_channel_delete(channel):
+    changed = False
+
+    if channel.id in locked_channels:
+        locked_channels.pop(channel.id)
+        changed = True
+
+    if channel.id in admin_log_channels:
+        admin_log_channels.pop(channel.id)
+        changed = True
+
+    if changed:
+        save_lock_config(locked_channels, admin_log_channels)
+
+
+@bot.tree.command(name="lock-add", description="Lock this channel - messages will be logged and deleted.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def lock_command(interaction: discord.Interaction):
+    locked_channels[interaction.channel_id] = True
+    save_lock_config(locked_channels, admin_log_channels)
+    await interaction.response.send_message(f"🔒 Channel locked.")
+
+
+@bot.tree.command(name="lock-remove", description="Unlock this channel.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def unlock_command(interaction: discord.Interaction):
+    if interaction.channel_id in locked_channels:
+        locked_channels.pop(interaction.channel_id)
+        save_lock_config(locked_channels, admin_log_channels)
+        await interaction.response.send_message("🔓 Channel unlocked.")
+    else:
+        await interaction.response.send_message("⚠️ This channel is not currently locked.", ephemeral=True)
+
+
+@bot.tree.command(name="lock-adminadd", description="Enable admin logging in this channel.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def adminadd_command(interaction: discord.Interaction):
+    admin_log_channels[interaction.channel_id] = True
+    save_lock_config(locked_channels, admin_log_channels)
+    await interaction.response.send_message("📋 Logging enabled in this channel.")
+
+
+@bot.tree.command(name="lock-adminstop", description="Stop admin logging in this channel.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def adminstop_command(interaction: discord.Interaction):
+    if interaction.channel_id in admin_log_channels:
+        admin_log_channels.pop(interaction.channel_id)
+        save_lock_config(locked_channels, admin_log_channels)
+        await interaction.response.send_message("🚫 **Logging stopped.**")
+    else:
+        await interaction.response.send_message("⚠️ This channel has no active logging.", ephemeral=True)
+
+
+@bot.tree.command(name="lock-pause", description="Pause message deletion for this channel or all locked channels.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def pause_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    guild_id = interaction.guild_id
+    if channel is None:
+        all_paused_guilds.add(guild_id)
+        await interaction.response.send_message("⏸️ Message deletion paused for all locked channels in this server.")
+        return
+    if guild_id not in server_pauses:
+        server_pauses[guild_id] = set()
+    server_pauses[guild_id].add(channel.id)
+    await interaction.response.send_message(f"⏸️ Message deletion paused for {channel.mention}.")
+
+
+@bot.tree.command(name="lock-resume", description="Resume message deletion for this channel or all locked channels.")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def resume_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    guild_id = interaction.guild_id
+    if channel is None:
+        all_paused_guilds.discard(guild_id)
+        await interaction.response.send_message("▶️ Message deletion resumed for all locked channels in this server.")
+        return
+    if guild_id not in server_pauses:
+        server_pauses[guild_id] = set()
+    server_pauses[guild_id].discard(channel.id)
+    await interaction.response.send_message(f"▶️ Message deletion resumed for {channel.mention}.")
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Welcome/Goodbye Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="welcome-add", description="Set the channel for welcome images")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def welcome_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_config, data = get_guild_config(str(interaction.guild.id))
+    guild_config["welcome_channel_id"] = channel.id
+    save_guild_data(data)
+    await interaction.response.send_message(f"✅ Welcome images will now be sent to {channel.mention}")
+
+
+@bot.tree.command(name="welcome-del", description="Disable welcome images for this server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def welcome_del(interaction: discord.Interaction):
+    guild_config, data = get_guild_config(str(interaction.guild.id))
+    guild_config["welcome_channel_id"] = None
+    save_guild_data(data)
+    await interaction.response.send_message("✅ Welcome images have been disabled.")
+
+
+@bot.tree.command(name="goodbye-add", description="Set the channel for goodbye images")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def goodbye_add(interaction: discord.Interaction, channel: discord.TextChannel):
+    guild_config, data = get_guild_config(str(interaction.guild.id))
+    guild_config["goodbye_channel_id"] = channel.id
+    save_guild_data(data)
+    await interaction.response.send_message(f"✅ Goodbye images will now be sent to {channel.mention}")
+
+
+@bot.tree.command(name="goodbye-del", description="Disable goodbye images for this server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+async def goodbye_del(interaction: discord.Interaction):
+    guild_config, data = get_guild_config(str(interaction.guild.id))
+    guild_config["goodbye_channel_id"] = None
+    save_guild_data(data)
+    await interaction.response.send_message("✅ Goodbye images have been disabled.")
+
+
+@bot.tree.command(name="test-goodbye", description="Preview the goodbye banner for a specific user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def test_goodbye(interaction: discord.Interaction, member: discord.Member = None):
+    target_member = member or interaction.user
+    await interaction.response.defer()
+    try:
+        goodbye_file = await create_goodbye_card(target_member)
+        if goodbye_file:
+            await interaction.followup.send(f"🎨 **Goodbye Banner Preview** for {target_member.mention}:", file=goodbye_file)
+        else:
+            await interaction.followup.send("❌ Failed to generate the image. Check the console for errors.")
+    except Exception as e:
+        print(f"Error in test-goodbye: {e}")
+        await interaction.followup.send(f"⚠️ An error occurred: {e}")
+
+
+@bot.tree.command(name="test-welcome", description="Preview the welcome banner for a specific user")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def test_welcome(interaction: discord.Interaction, member: discord.Member = None):
+    target_member = member or interaction.user
+    await interaction.response.defer()
+    try:
+        welcome_file = await create_welcome_card(target_member)
+        if welcome_file:
+            await interaction.followup.send(f"🎨 **Welcome Banner Preview** for {target_member.mention}:", file=welcome_file)
+        else:
+            await interaction.followup.send("❌ Failed to generate the image. Check the console for errors.")
+    except Exception as e:
+        print(f"Error in test-welcome: {e}")
+        await interaction.followup.send(f"⚠️ An error occurred: {e}")
+
+
+async def create_welcome_card(member):
+    base_path = os.path.dirname(__file__)
+    bg_path = os.path.join(base_path, "welcome_bg.png")
+    font_path = os.path.join(base_path, "Minecraft.ttf")
+
+    if not os.path.exists(bg_path):
+        print(f"❌ Background not found at: {bg_path}")
+        return None
+
+    background = Image.open(bg_path).convert("RGBA")
+    avatar_bytes = await member.display_avatar.with_format("png").read()
+
+    with Image.open(io.BytesIO(avatar_bytes)) as avatar:
+        avatar = avatar.convert("RGBA").resize((160, 160))
+        background.paste(avatar, (480, 40))
+
+    draw = ImageDraw.Draw(background)
+    try:
+        font_big = ImageFont.truetype(font_path, 35)
+        font_small = ImageFont.truetype(font_path, 15)
+        font_medium = ImageFont.truetype(font_path, 25)
+    except Exception as e:
+        print(f"⚠️ Font error: {e}. Using default.")
+        font_big = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+        font_medium = ImageFont.load_default()
+
+    draw.text((35, 30), f"Welcome", fill=(255, 255, 255), font=font_big)
+    draw.text((35, 80), f"{member.display_name}", fill=(255, 255, 255), font=font_medium)
+    draw.text((35, 140), f"to the {member.guild.name} server", fill=(200, 200, 200), font=font_small)
+
+    buffer = io.BytesIO()
+    background.save(buffer, format="PNG")
+    buffer.seek(0)
+    return discord.File(buffer, filename="welcome.png")
+
+
+async def create_goodbye_card(member):
+    base_path = os.path.dirname(__file__)
+    goodbye_bg_path = os.path.join(base_path, "goodbye_bg.png")
+    bg_path = goodbye_bg_path if os.path.exists(goodbye_bg_path) else os.path.join(base_path, "welcome_bg.png")
+    font_path = os.path.join(base_path, "Minecraft.ttf")
+
+    if not os.path.exists(bg_path):
+        print(f"❌ Goodbye background not found at: {bg_path}")
+        return None
+
+    background = Image.open(bg_path).convert("RGBA")
+    avatar_bytes = await member.display_avatar.with_format("png").read()
+
+    with Image.open(io.BytesIO(avatar_bytes)) as avatar:
+        avatar = avatar.convert("RGBA").resize((160, 160))
+        background.paste(avatar, (480, 40))
+
+    draw = ImageDraw.Draw(background)
+    try:
+        font_big = ImageFont.truetype(font_path, 35)
+        font_small = ImageFont.truetype(font_path, 15)
+        font_medium = ImageFont.truetype(font_path, 25)
+    except Exception as e:
+        print(f"⚠️ Font error: {e}. Using default.")
+        font_big = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+        font_medium = ImageFont.load_default()
+
+    draw.text((35, 30), "Goodbye", fill=(255, 255, 255), font=font_big)
+    draw.text((35, 80), f"{member.display_name}", fill=(255, 255, 255), font=font_medium)
+    draw.text((35, 140), f"from {member.guild.name}", fill=(200, 200, 200), font=font_small)
+    draw.text((35, 170), "We hope to see you again soon!", fill=(200, 200, 200), font=font_small)
+
+    buffer = io.BytesIO()
+    background.save(buffer, format="PNG")
+    buffer.seek(0)
+    return discord.File(buffer, filename="goodbye.png")
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Economy Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 @bot.tree.command(name="eco-leaderboard", description="Show the server economy leaderboard")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -2196,6 +2511,7 @@ async def eco_leaderboard(interaction: discord.Interaction, limit: int = 10):
     embed = discord.Embed(title=f"🏆 Economy Standings Leaderboard - {interaction.guild.name}", color=discord.Color.gold())
     embed.description = "\n".join(description_lines)
     await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="eco-balance", description="Check your balance (or another user's if owner)")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -2332,7 +2648,14 @@ async def eco_balance_edit(interaction: discord.Interaction, user: discord.Membe
     save_data(data)
     await interaction.response.send_message(f"✅ Set {user.display_name}'s balance to **${amount}**.")
 
-# --- Economy Mini-Games ---
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Minigames
+# -------------------------------------------------------------------------------------------------------------
+
+
 
 
 @bot.tree.command(name="game-slot", description="Play the economy slot machine and wager money")
@@ -2368,6 +2691,7 @@ async def game_slot(interaction: discord.Interaction, amount: int):
     embed.add_field(name="Outcome", value=result_text, inline=False)
     embed.set_footer(text=f"Before: ${before_balance} • After: ${user_data['balance']}")
     await interaction.response.send_message(embed=embed)
+
 
 @bot.tree.command(name="game-coinflip", description="Play coinflip and wager money")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -2686,6 +3010,7 @@ class TowerButton(discord.ui.Button):
             view.embed.set_footer(text=f"Before: ${view.before_balance} • After: ${after_balance}")
             await interaction.response.edit_message(embed=view.embed, view=view)
 
+
 class CashoutButton(discord.ui.Button):
     def __init__(self):
         super().__init__(style=discord.ButtonStyle.primary, label="Cash Out", row=0)
@@ -2851,8 +3176,6 @@ async def game_towers(interaction: discord.Interaction, amount: int):
     active_minigame_users.add(interaction.user.id)
     await interaction.response.send_message(embed=view.embed, view=view)
     view.message = await interaction.original_response()
-
-# --- Work Game Classes ---
 
 class DeveloperCodeSelect(discord.ui.Select):
     def __init__(self, correct_index: int):
@@ -3134,6 +3457,7 @@ class WorkGameView(discord.ui.View):
 
 work_cooldowns = {}
 
+
 @bot.tree.command(name="game-work", description="Work to earn money (get 1 of 3 random jobs, 2 hour cooldown)")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def game_work(interaction: discord.Interaction):
@@ -3168,7 +3492,14 @@ async def game_work(interaction: discord.Interaction):
     view.message = await interaction.original_response()
 
 
-# --- Crafting Commands ---
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Crafting Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
 
 @bot.tree.command(name="eco-craft-add", description="Add a recipe (Owner Only)")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -3511,294 +3842,14 @@ async def info_uses(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-# --- Welcome Commands ---
-
-@bot.tree.command(name="welcome-add", description="Set the channel for welcome images")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def welcome_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["welcome_channel_id"] = channel.id
-    save_guild_data(data)
-    await interaction.response.send_message(f"✅ Welcome images will now be sent to {channel.mention}")
 
 
-@bot.tree.command(name="welcome-del", description="Disable welcome images for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def welcome_del(interaction: discord.Interaction):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["welcome_channel_id"] = None
-    save_guild_data(data)
-    await interaction.response.send_message("✅ Welcome images have been disabled.")
+# -------------------------------------------------------------------------------------------------------------
+#                                               Leveling System
+# -------------------------------------------------------------------------------------------------------------
 
 
-@bot.tree.command(name="goodbye-add", description="Set the channel for goodbye images")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def goodbye_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["goodbye_channel_id"] = channel.id
-    save_guild_data(data)
-    await interaction.response.send_message(f"✅ Goodbye images will now be sent to {channel.mention}")
 
-
-@bot.tree.command(name="goodbye-del", description="Disable goodbye images for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def goodbye_del(interaction: discord.Interaction):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["goodbye_channel_id"] = None
-    save_guild_data(data)
-    await interaction.response.send_message("✅ Goodbye images have been disabled.")
-
-
-@bot.tree.command(name="test-goodbye", description="Preview the goodbye banner for a specific user")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def test_goodbye(interaction: discord.Interaction, member: discord.Member = None):
-    target_member = member or interaction.user
-    await interaction.response.defer()
-    try:
-        goodbye_file = await create_goodbye_card(target_member)
-        if goodbye_file:
-            await interaction.followup.send(f"🎨 **Goodbye Banner Preview** for {target_member.mention}:", file=goodbye_file)
-        else:
-            await interaction.followup.send("❌ Failed to generate the image. Check the console for errors.")
-    except Exception as e:
-        print(f"Error in test-goodbye: {e}")
-        await interaction.followup.send(f"⚠️ An error occurred: {e}")
-
-
-@bot.tree.command(name="test-welcome", description="Preview the welcome banner for a specific user")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def test_welcome(interaction: discord.Interaction, member: discord.Member = None):
-    target_member = member or interaction.user
-    await interaction.response.defer()
-    try:
-        welcome_file = await create_welcome_card(target_member)
-        if welcome_file:
-            await interaction.followup.send(f"🎨 **Welcome Banner Preview** for {target_member.mention}:", file=welcome_file)
-        else:
-            await interaction.followup.send("❌ Failed to generate the image. Check the console for errors.")
-    except Exception as e:
-        print(f"Error in test-welcome: {e}")
-        await interaction.followup.send(f"⚠️ An error occurred: {e}")
-
-
-async def create_welcome_card(member):
-    base_path = os.path.dirname(__file__)
-    bg_path = os.path.join(base_path, "welcome_bg.png")
-    font_path = os.path.join(base_path, "Minecraft.ttf")
-
-    if not os.path.exists(bg_path):
-        print(f"❌ Background not found at: {bg_path}")
-        return None
-
-    background = Image.open(bg_path).convert("RGBA")
-    avatar_bytes = await member.display_avatar.with_format("png").read()
-
-    with Image.open(io.BytesIO(avatar_bytes)) as avatar:
-        avatar = avatar.convert("RGBA").resize((160, 160))
-        background.paste(avatar, (480, 40))
-
-    draw = ImageDraw.Draw(background)
-    try:
-        font_big = ImageFont.truetype(font_path, 35)
-        font_small = ImageFont.truetype(font_path, 15)
-        font_medium = ImageFont.truetype(font_path, 25)
-    except Exception as e:
-        print(f"⚠️ Font error: {e}. Using default.")
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-        font_medium = ImageFont.load_default()
-
-    draw.text((35, 30), f"Welcome", fill=(255, 255, 255), font=font_big)
-    draw.text((35, 80), f"{member.display_name}", fill=(255, 255, 255), font=font_medium)
-    draw.text((35, 140), f"to the {member.guild.name} server", fill=(200, 200, 200), font=font_small)
-
-    buffer = io.BytesIO()
-    background.save(buffer, format="PNG")
-    buffer.seek(0)
-    return discord.File(buffer, filename="welcome.png")
-
-
-async def create_goodbye_card(member):
-    base_path = os.path.dirname(__file__)
-    goodbye_bg_path = os.path.join(base_path, "goodbye_bg.png")
-    bg_path = goodbye_bg_path if os.path.exists(goodbye_bg_path) else os.path.join(base_path, "welcome_bg.png")
-    font_path = os.path.join(base_path, "Minecraft.ttf")
-
-    if not os.path.exists(bg_path):
-        print(f"❌ Goodbye background not found at: {bg_path}")
-        return None
-
-    background = Image.open(bg_path).convert("RGBA")
-    avatar_bytes = await member.display_avatar.with_format("png").read()
-
-    with Image.open(io.BytesIO(avatar_bytes)) as avatar:
-        avatar = avatar.convert("RGBA").resize((160, 160))
-        background.paste(avatar, (480, 40))
-
-    draw = ImageDraw.Draw(background)
-    try:
-        font_big = ImageFont.truetype(font_path, 35)
-        font_small = ImageFont.truetype(font_path, 15)
-        font_medium = ImageFont.truetype(font_path, 25)
-    except Exception as e:
-        print(f"⚠️ Font error: {e}. Using default.")
-        font_big = ImageFont.load_default()
-        font_small = ImageFont.load_default()
-        font_medium = ImageFont.load_default()
-
-    draw.text((35, 30), "Goodbye", fill=(255, 255, 255), font=font_big)
-    draw.text((35, 80), f"{member.display_name}", fill=(255, 255, 255), font=font_medium)
-    draw.text((35, 140), f"from {member.guild.name}", fill=(200, 200, 200), font=font_small)
-    draw.text((35, 170), "We hope to see you again soon!", fill=(200, 200, 200), font=font_small)
-
-    buffer = io.BytesIO()
-    background.save(buffer, format="PNG")
-    buffer.seek(0)
-    return discord.File(buffer, filename="goodbye.png")
-
-# --- Shard Info Command ---
-
-@bot.tree.command(name="own-shard-info", description="(owner) Display shard status and guild distribution")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def shard_info(interaction: discord.Interaction):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
-
-    total_shards = len(bot.shards) or 1
-    embed = discord.Embed(title="🔀 Shard Information", color=discord.Color.blurple())
-    embed.add_field(name="Total Shards", value=str(total_shards), inline=True)
-    embed.add_field(name="Total Guilds", value=str(len(bot.guilds)), inline=True)
-    embed.add_field(name="Total Users", value=str(len(bot.users)), inline=True)
-
-    for shard_id, shard in bot.shards.items():
-        guilds_on_shard = [g for g in bot.guilds if g.shard_id == shard_id]
-        latency_ms = round(shard.latency * 1000, 1)
-        embed.add_field(
-            name=f"Shard {shard_id}",
-            value=f"📶 {latency_ms}ms | 🏠 {len(guilds_on_shard)} guild(s)",
-            inline=False,
-        )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-@bot.tree.command(name="own-shard-map", description="(owner) Show which guilds are assigned to each shard")
-async def shard_map(interaction: discord.Interaction):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
-
-    shard_map = {}
-    for guild in bot.guilds:
-        shard_id = getattr(guild, 'shard_id', 0)
-        shard_map.setdefault(shard_id, []).append(f"> **{guild.name}** ||({guild.id})||")
-
-    embed = discord.Embed(
-        title="🧩 Shard Assignment Map",
-        description="Shows which servers are served by each shard.",
-        color=discord.Color.blurple()
-    )
-    for shard_id in sorted(shard_map.keys()):
-        guild_list = shard_map[shard_id]
-        value = "\n".join(guild_list)
-        embed.add_field(name=f"Shard {shard_id}", value=value, inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-# --- lockbot port ---
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    changed = False
-
-    if channel.id in locked_channels:
-        locked_channels.pop(channel.id)
-        changed = True
-
-    if channel.id in admin_log_channels:
-        admin_log_channels.pop(channel.id)
-        changed = True
-
-    if changed:
-        save_lock_config(locked_channels, admin_log_channels)
-
-
-@bot.tree.command(name="lock-add", description="Lock this channel - messages will be logged and deleted.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def lock_command(interaction: discord.Interaction):
-    locked_channels[interaction.channel_id] = True
-    save_lock_config(locked_channels, admin_log_channels)
-    await interaction.response.send_message(f"🔒 Channel locked.")
-
-
-@bot.tree.command(name="lock-remove", description="Unlock this channel.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def unlock_command(interaction: discord.Interaction):
-    if interaction.channel_id in locked_channels:
-        locked_channels.pop(interaction.channel_id)
-        save_lock_config(locked_channels, admin_log_channels)
-        await interaction.response.send_message("🔓 Channel unlocked.")
-    else:
-        await interaction.response.send_message("⚠️ This channel is not currently locked.", ephemeral=True)
-
-
-@bot.tree.command(name="lock-adminadd", description="Enable admin logging in this channel.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def adminadd_command(interaction: discord.Interaction):
-    admin_log_channels[interaction.channel_id] = True
-    save_lock_config(locked_channels, admin_log_channels)
-    await interaction.response.send_message("📋 Logging enabled in this channel.")
-
-
-@bot.tree.command(name="lock-adminstop", description="Stop admin logging in this channel.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def adminstop_command(interaction: discord.Interaction):
-    if interaction.channel_id in admin_log_channels:
-        admin_log_channels.pop(interaction.channel_id)
-        save_lock_config(locked_channels, admin_log_channels)
-        await interaction.response.send_message("🚫 **Logging stopped.**")
-    else:
-        await interaction.response.send_message("⚠️ This channel has no active logging.", ephemeral=True)
-
-
-@bot.tree.command(name="lock-pause", description="Pause message deletion for this channel or all locked channels.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def pause_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    guild_id = interaction.guild_id
-    if channel is None:
-        all_paused_guilds.add(guild_id)
-        await interaction.response.send_message("⏸️ Message deletion paused for all locked channels in this server.")
-        return
-    if guild_id not in server_pauses:
-        server_pauses[guild_id] = set()
-    server_pauses[guild_id].add(channel.id)
-    await interaction.response.send_message(f"⏸️ Message deletion paused for {channel.mention}.")
-
-
-@bot.tree.command(name="lock-resume", description="Resume message deletion for this channel or all locked channels.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def resume_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    guild_id = interaction.guild_id
-    if channel is None:
-        all_paused_guilds.discard(guild_id)
-        await interaction.response.send_message("▶️ Message deletion resumed for all locked channels in this server.")
-        return
-    if guild_id not in server_pauses:
-        server_pauses[guild_id] = set()
-    server_pauses[guild_id].discard(channel.id)
-    await interaction.response.send_message(f"▶️ Message deletion resumed for {channel.mention}.")
-
-# --- Leveling System ---
 
 async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int):
     if member.bot:
@@ -3878,6 +3929,7 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int):
                     file=file
                 )
 
+
 async def create_levelup_card(member: discord.Member, level: int):
     base_path = os.path.dirname(__file__)
     bg_path = os.path.join(base_path, "levelup_bg.png")
@@ -3909,6 +3961,7 @@ async def create_levelup_card(member: discord.Member, level: int):
     buffer.seek(0)
     return buffer
 
+
 @tasks.loop(minutes=2.0)
 async def voice_xp_tracker():
     await bot.wait_until_ready()
@@ -3923,6 +3976,7 @@ COLOR_EMOJIS = {
     "white": "⬜", "black": "⬛", "red": "🟥", "blue": "🟦", 
     "green": "🟩", "yellow": "🟨", "purple": "🟪", "orange": "🟧", "brown": "🟫"
 }
+
 
 @bot.tree.command(name="color", description="Choose the block color for your /level tracking progress bar")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -4031,6 +4085,7 @@ async def lvl_channel_set(interaction: discord.Interaction, channel: discord.Tex
     save_levels(levels)
     await interaction.response.send_message(f"📌 Destination updated! Level-up notifications will now send to {channel.mention}.")
 
+
 @bot.tree.command(name="lvl-channel-remove", description="(Admin) Disable level-up notification image cards from sending")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.checks.has_permissions(manage_guild=True)
@@ -4051,6 +4106,7 @@ async def lvl_channel_remove(interaction: discord.Interaction):
         "🗑️ Configuration removed! Level-up image banners are now disabled for this server.", 
         ephemeral=True
     )
+
 
 @bot.tree.command(name="lvl-rewards-set", description="(Admin) Map an automatic reward milestone to a level")
 @app_commands.allowed_installs(guilds=True, users=False)
@@ -4220,5 +4276,167 @@ async def lvl_rewards_del(interaction: discord.Interaction, level: int):
 
     await interaction.response.send_message(f"🗑️ Removed all rewards configured for level {level}.", ephemeral=True)
 
-# Run the bot
+
+
+
+# -------------------------------------------------------------------------------------------------------------
+#                                               Owner Commands
+# -------------------------------------------------------------------------------------------------------------
+
+
+
+
+@bot.tree.command(name="own-shutdown", description="(owner) Stop the bot for an update or just to restart")
+@app_commands.describe(
+    channel="Optional announcement channel to send the shutdown message to",
+    reason="The shutdown reason to publish"
+)
+async def own_shutdown(
+    interaction: discord.Interaction,
+    channel: discord.TextChannel = None,
+    reason: str = "No reason provided"
+):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Do not even try...", ephemeral=True)
+
+    target_channel = channel or bot.get_channel(1514173159052415026)
+    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
+        target_channel = interaction.channel
+
+    shutdown_text = (
+        f"🔌 {reason}"
+    )
+    shutdown_embed = discord.Embed(
+        title="Bot Shutdown Initiated",
+        description=shutdown_text,
+        color=discord.Color.light_gray()
+    )
+
+    published = False
+    if target_channel is not None:
+        try:
+            sent_msg = await target_channel.send(embed=shutdown_embed)
+            if target_channel.type == discord.ChannelType.news:
+                try:
+                    await sent_msg.publish()
+                    published = True
+                except Exception:
+                    published = False
+        except Exception as e:
+            await interaction.response.send_message(
+                f"❌ Could not send the shutdown notice to {target_channel.mention}. Error: {e}",
+                ephemeral=True
+            )
+            return
+
+    if update_presence.is_running():
+        update_presence.cancel()
+        await asyncio.sleep(1)
+
+    response_text = "Going to sleep..."
+    if target_channel is not None:
+        response_text = (
+            f"Shutdown notice sent to {target_channel.mention}. "
+            + ("Published to followers." if published else "")
+        )
+
+    await interaction.response.send_message(response_text)
+
+    shutdown_activity = discord.Activity(type=discord.ActivityType.watching, name="App is shutting down!!! !! !")
+    sleep_activity = discord.Activity(type=discord.ActivityType.watching, name="App is sleeping... zZzZzZ")
+    for shard_id in bot.shards:
+        await bot.change_presence(activity=shutdown_activity, status=discord.Status.dnd, shard_id=shard_id)
+    await asyncio.sleep(10)
+    for shard_id in bot.shards:
+        await bot.change_presence(activity=sleep_activity, status=discord.Status.idle, shard_id=shard_id)
+    await bot.close()
+
+
+@bot.tree.command(name="own-stop-urgent", description="(owner) STOPS IMMEDIATLY IF SOMETHING WENT REALLY WRONG")
+@app_commands.describe(channel="Optional announcement channel to send the force shutdown message to")
+async def own_stop_urgent(interaction: discord.Interaction, channel: discord.TextChannel = None):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Stop.", ephemeral=True)
+
+    target_channel = channel or bot.get_channel(1514173159052415026)
+    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
+        target_channel = interaction.channel
+
+    force_text = "⚠️ The bot is going offline immediately due to an urgent issue."
+    force_embed = discord.Embed(
+        title="Force Shutdown",
+        description=force_text,
+        color=discord.Color.red()
+    )
+
+    if target_channel is not None:
+        try:
+            sent_msg = await target_channel.send(embed=force_embed)
+            if target_channel.type == discord.ChannelType.news:
+                try:
+                    await sent_msg.publish()
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    if update_presence.is_running():
+        update_presence.cancel()
+    await interaction.response.send_message("Goodbye.")
+    forced_activity = discord.Activity(type=discord.ActivityType.watching, name="App was shutdown forcefully...")
+    for shard_id in bot.shards:
+        await bot.change_presence(activity=forced_activity, status=discord.Status.dnd, shard_id=shard_id)
+    await bot.close()
+
+
+@bot.tree.command(name="own-shard-info", description="(owner) Display shard status and guild distribution")
+@app_commands.allowed_installs(guilds=True, users=False)
+async def shard_info(interaction: discord.Interaction):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ Owner only.", ephemeral=True)
+
+    total_shards = len(bot.shards) or 1
+    embed = discord.Embed(title="🔀 Shard Information", color=discord.Color.blurple())
+    embed.add_field(name="Total Shards", value=str(total_shards), inline=True)
+    embed.add_field(name="Total Guilds", value=str(len(bot.guilds)), inline=True)
+    embed.add_field(name="Total Users", value=str(len(bot.users)), inline=True)
+
+    for shard_id, shard in bot.shards.items():
+        guilds_on_shard = [g for g in bot.guilds if g.shard_id == shard_id]
+        latency_ms = round(shard.latency * 1000, 1)
+        embed.add_field(
+            name=f"Shard {shard_id}",
+            value=f"📶 {latency_ms}ms | 🏠 {len(guilds_on_shard)} guild(s)",
+            inline=False,
+        )
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+@bot.tree.command(name="own-shard-map", description="(owner) Show which guilds are assigned to each shard")
+async def shard_map(interaction: discord.Interaction):
+    if not await bot.is_owner(interaction.user):
+        return await interaction.response.send_message("❌ You are not authorized to use this command.", ephemeral=True)
+
+    shard_map = {}
+    for guild in bot.guilds:
+        shard_id = getattr(guild, 'shard_id', 0)
+        shard_map.setdefault(shard_id, []).append(f"> **{guild.name}** ||({guild.id})||")
+
+    embed = discord.Embed(
+        title="🧩 Shard Assignment Map",
+        description="Shows which servers are served by each shard.",
+        color=discord.Color.blurple()
+    )
+    for shard_id in sorted(shard_map.keys()):
+        guild_list = shard_map[shard_id]
+        value = "\n".join(guild_list)
+        embed.add_field(name=f"Shard {shard_id}", value=value, inline=False)
+
+    await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+
+
+# -------------------------------------------------------------------------------------------------------------
 bot.run(TOKEN)
