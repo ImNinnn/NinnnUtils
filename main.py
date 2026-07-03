@@ -4,24 +4,25 @@ import json
 import os
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from collections import Counter
 import yt_dlp
 import discord
-from discord import TextInput, app_commands, Status
+from discord import ComponentType, TextInput, app_commands, Status
 from discord.ext import tasks, commands
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 import io
+import unicodedata
 from deep_translator import GoogleTranslator
 import base64
 import queue
 import threading
 import traceback
-from discord.ui import Modal, TextInput
+from discord.ui import Modal, Separator, TextInput, View, Button, LayoutView, Container, Section, TextDisplay, MediaGallery, ChannelSelect
 from pypresence import Presence
 from pypresence.types import ActivityType
-
+import aiohttp
 
 
 
@@ -44,7 +45,7 @@ SHARD_COUNT = int(os.getenv('SHARD_COUNT', '0'))
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'economy.json')
-LOVE_FILE = os.path.join(BASE_DIR, 'love.json')
+RATE_FILE = os.path.join(BASE_DIR, 'rate.json')
 FUN_FILE = os.path.join(BASE_DIR, 'fun.json')
 BOARD_FILE = os.path.join(BASE_DIR, 'board.json')
 GUILD_FILE = os.path.join(BASE_DIR, 'guild.json')
@@ -66,7 +67,7 @@ USER_FILE = os.path.join(BASE_DIR, 'user.json')
 class MyDiscordApp(commands.AutoShardedBot):
     def __init__(self, intents, shard_count: int = 0):
         super().__init__(
-            command_prefix="/",
+            command_prefix="n!",
             intents=intents,
             shard_count=shard_count or None,
         )
@@ -115,6 +116,398 @@ FFMPEG_OPTIONS = {
     'options': '-vn'
 }
 
+song_queues = {}
+
+def get_song_queue(guild_id: str) -> dict:
+    return song_queues.setdefault(guild_id, {
+        'tracks': [],
+        'current_index': 0,
+        'loop': False,
+        'stop_action': None,
+        'now_playing_message_id': None,
+        'now_playing_channel_id': None,
+        'now_playing_task': None,
+        'track_start_time': None,
+        'accumulated_pause': 0.0,
+        'pause_started_at': None,
+    })
+
+
+def format_duration(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+def build_progress_bar(elapsed: float, duration: float, length: int = 20) -> str:
+    if duration <= 0:
+        return "<:Square_Brown:1517679892039204955>" * length
+    progress = min(max(int((elapsed / duration) * length), 0), length)
+    filled = "<:Square_Brown:1517679892039204955>" * progress
+    empty = "<:Square_Black:1517679889615032540>" * (length - progress)
+    return f"{filled}{empty}"
+
+
+def get_current_elapsed(queue: dict) -> float:
+    if not queue.get('track_start_time'):
+        return 0.0
+    if queue.get('pause_started_at'):
+        return max(0.0, queue['pause_started_at'] - queue['track_start_time'] - queue['accumulated_pause'])
+    return max(0.0, time.time() - queue['track_start_time'] - queue['accumulated_pause'])
+
+
+def build_song_embed(guild_id: str) -> discord.Embed | None:
+    queue = get_song_queue(guild_id)
+    if not queue['tracks'] or queue['current_index'] >= len(queue['tracks']):
+        return None
+
+    track = queue['tracks'][queue['current_index']]
+    duration = track.get('duration', 0) or 0
+    elapsed = get_current_elapsed(queue)
+    elapsed = min(elapsed, duration)
+    remaining = max(duration - elapsed, 0)
+    progress = build_progress_bar(elapsed, duration)
+    index = queue['current_index'] + 1
+    total = len(queue['tracks'])
+
+    # Calculate unix timestamps for Discord dynamic time formatting
+    end_time_unix = int(time.time() + remaining)
+    discord_time_remaining = f"<t:{end_time_unix}:R>"
+    if queue.get('pause_started_at') or not queue.get('track_start_time'):
+        discord_elapsed = format_duration(elapsed)
+    else:
+        discord_elapsed = f"<t:{int(queue['track_start_time'])}:R>"
+
+    embed = discord.Embed(
+        title="<:music:1517575582764765224> Now Playing",
+        description=f"**{track.get('title', 'Unknown Title')}**",
+        color=discord.Color.from_rgb(130, 84, 54)
+    )
+
+    thumbnail = track.get('thumbnail')
+    if thumbnail:
+        embed.set_thumbnail(url=thumbnail)
+
+    status = "Paused" if queue.get('pause_started_at') else "Playing"
+    embed.add_field(name="<:list:1517497572770451567> Track", value=f"{index} / {total}", inline=True)
+    embed.add_field(name="<:gear:1517576939097952496> Status", value=status, inline=True)
+    embed.add_field(name="<:hourglass:1517574046252924938> Time Remaining", value=discord_time_remaining, inline=True)
+    embed.add_field(name="<:timer:1517996239583576194> Progress", value=f"{discord_elapsed} / {format_duration(duration)}\n{progress}", inline=False)
+
+    next_tracks = []
+    for next_index in range(queue['current_index'] + 1, min(len(queue['tracks']), queue['current_index'] + 6)):
+        next_track = queue['tracks'][next_index]
+        next_tracks.append(f"{next_index + 1}. {next_track.get('title', 'Unknown Title')}")
+    next_text = "\n".join(next_tracks) if next_tracks else "No songs queued."
+    embed.add_field(name="<:next:1518977801057861643> Up Next", value=next_text, inline=False)
+
+    if track.get('requested_by'):
+        embed.set_footer(text=f"Requested by {track['requested_by']}")
+
+    return embed
+
+
+class NowPlayingControlsView(discord.ui.View):
+    def __init__(self, guild_id: str):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.update_button_states()
+
+    def update_button_states(self):
+        queue = get_song_queue(self.guild_id)
+        is_paused = bool(queue.get('pause_started_at'))
+        self.pause_button.label = "Resume" if is_paused else "Pause"
+        self.pause_button.style = discord.ButtonStyle.success if is_paused else discord.ButtonStyle.secondary
+
+        self.loop_button.label = "Loop: On" if queue.get('loop') else "Loop: Off"
+        self.loop_button.style = discord.ButtonStyle.success if queue.get('loop') else discord.ButtonStyle.secondary
+
+        self.previous_button.disabled = queue.get('current_index', 0) <= 0
+        self.next_button.disabled = queue.get('current_index', 0) + 1 >= len(queue.get('tracks', []))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        return interaction.guild is not None and str(interaction.guild.id) == self.guild_id
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="nowplaying_previous")
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.guild_id
+        queue = get_song_queue(guild_id)
+        voice_client = interaction.guild.voice_client
+
+        if not voice_client or not voice_client.is_connected():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel.", ephemeral=True)
+            return
+        if not queue['tracks']:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The queue is empty.", ephemeral=True)
+            return
+
+        if queue['current_index'] >= len(queue['tracks']):
+            queue['current_index'] = len(queue['tracks']) - 1
+
+        if queue['current_index'] > 0:
+            queue['current_index'] -= 1
+            queue['stop_action'] = 'manual'
+            voice_client.stop()
+            self.update_button_states()
+            await interaction.response.send_message(f"<:prev:1518977803092234331> Now playing **{queue['tracks'][queue['current_index']]['title']}**.", ephemeral=True)
+            await play_guild_song(guild_id, voice_client)
+            return
+
+        await interaction.response.send_message("<:disapprove:1517452151012589662> There is no previous song.", ephemeral=True)
+
+    @discord.ui.button(label="Pause", style=discord.ButtonStyle.secondary, custom_id="nowplaying_pause")
+    async def pause_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.guild_id
+        queue = get_song_queue(guild_id)
+        voice_client = interaction.guild.voice_client
+
+        if not voice_client or not voice_client.is_connected():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel.", ephemeral=True)
+            return
+
+        if voice_client.is_paused():
+            voice_client.resume()
+            if queue.get('pause_started_at'):
+                queue['accumulated_pause'] += time.time() - queue['pause_started_at']
+                queue['pause_started_at'] = None
+            await self.refresh_message(interaction)
+            await interaction.response.send_message("<:play:1517576855965716> Resumed playback.", ephemeral=True)
+            return
+
+        if not voice_client.is_playing():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Nothing is playing right now.", ephemeral=True)
+            return
+
+        voice_client.pause()
+        queue['pause_started_at'] = time.time()
+        await self.refresh_message(interaction)
+        await interaction.response.send_message("<:pause:1517497575219920986> Paused the song.", ephemeral=True)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, custom_id="nowplaying_next")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.guild_id
+        queue = get_song_queue(guild_id)
+        voice_client = interaction.guild.voice_client
+
+        if not voice_client or not voice_client.is_connected():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel.", ephemeral=True)
+            return
+        if not queue['tracks']:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The queue is empty.", ephemeral=True)
+            return
+
+        if queue['current_index'] >= len(queue['tracks']):
+            queue['current_index'] = len(queue['tracks']) - 1
+
+        if queue['current_index'] + 1 < len(queue['tracks']):
+            queue['current_index'] += 1
+            queue['stop_action'] = 'manual'
+            voice_client.stop()
+            self.update_button_states()
+            await interaction.response.send_message(f"<:next:1518977801057865224> Skipped to **{queue['tracks'][queue['current_index']]['title']}**.", ephemeral=True)
+            await play_guild_song(guild_id, voice_client)
+            return
+
+        queue['current_index'] = len(queue['tracks'])
+        queue['stop_action'] = 'manual'
+        voice_client.stop()
+        await cleanup_now_playing_embed(guild_id)
+        await interaction.response.send_message("<:disapprove:1517452151012589662> No more songs in the queue. Playback stopped.", ephemeral=True)
+
+    @discord.ui.button(label="Loop: Off", style=discord.ButtonStyle.secondary, custom_id="nowplaying_loop")
+    async def loop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild_id = self.guild_id
+        queue = get_song_queue(guild_id)
+        queue['loop'] = not queue.get('loop', False)
+        self.update_button_states()
+        await self.refresh_message(interaction)
+        state = "enabled" if queue['loop'] else "disabled"
+        await interaction.response.send_message(f"<:loop:1518977798939742449> Looping is now {state}.", ephemeral=True)
+
+    async def refresh_message(self, interaction: discord.Interaction):
+        self.update_button_states()
+        queue = get_song_queue(self.guild_id)
+        if not queue.get('now_playing_message_id'):
+            return
+        channel = get_now_playing_channel(queue)
+        if not channel:
+            return
+        embed = build_song_embed(self.guild_id)
+        if not embed:
+            return
+        try:
+            message = await channel.fetch_message(queue['now_playing_message_id'])
+            await message.edit(embed=embed, view=self)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+
+async def cleanup_now_playing_embed(guild_id: str):
+    queue = get_song_queue(guild_id)
+    task = queue.get('now_playing_task')
+    queue['now_playing_task'] = None
+    if task is not None and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
+    channel_id = queue.get('now_playing_channel_id')
+    message_id = queue.get('now_playing_message_id')
+    queue['now_playing_message_id'] = None
+    if not channel_id or not message_id:
+        return
+
+    channel = bot.get_channel(channel_id)
+    if not channel:
+        return
+
+    try:
+        message = await channel.fetch_message(message_id)
+        await message.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
+
+def get_now_playing_channel(queue: dict) -> discord.TextChannel | None:
+    if not queue.get('now_playing_channel_id'):
+        return None
+    return bot.get_channel(queue['now_playing_channel_id'])
+
+
+async def refresh_now_playing_embed(guild_id: str):
+    queue = get_song_queue(guild_id)
+    if not queue.get('now_playing_message_id'):
+        return
+    channel = get_now_playing_channel(queue)
+    if not channel:
+        return
+    embed = build_song_embed(guild_id)
+    if not embed:
+        return
+    try:
+        message = await channel.fetch_message(queue['now_playing_message_id'])
+        view = queue.get('now_playing_view')
+        if view:
+            view.update_button_states()
+            await message.edit(embed=embed, view=view)
+        else:
+            await message.edit(embed=embed)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def update_now_playing_embed_loop(guild_id: str):
+    queue = get_song_queue(guild_id)
+    while True:
+        await asyncio.sleep(10)
+        if not queue.get('now_playing_message_id') or not queue.get('tracks'):
+            break
+        if queue['current_index'] >= len(queue['tracks']):
+            break
+        await refresh_now_playing_embed(guild_id)
+    queue['now_playing_task'] = None
+
+
+async def start_now_playing_embed(guild_id: str):
+    queue = get_song_queue(guild_id)
+    if not queue.get('tracks') or queue['current_index'] >= len(queue['tracks']):
+        return
+    if not queue.get('now_playing_channel_id'):
+        return
+
+    await cleanup_now_playing_embed(guild_id)
+    channel = get_now_playing_channel(queue)
+    if not channel:
+        return
+
+    embed = build_song_embed(guild_id)
+    if not embed:
+        return
+
+    try:
+        view = queue.get('now_playing_view')
+        if view is None:
+            view = NowPlayingControlsView(guild_id)
+            queue['now_playing_view'] = view
+        else:
+            view.update_button_states()
+
+        message = await channel.send(embed=embed, view=view)
+        queue['now_playing_message_id'] = message.id
+        queue['now_playing_task'] = asyncio.create_task(update_now_playing_embed_loop(guild_id))
+    except Exception:
+        queue['now_playing_message_id'] = None
+        queue['now_playing_task'] = None
+
+
+async def play_guild_song(guild_id: str, voice_client: discord.VoiceClient) -> bool:
+    queue = get_song_queue(guild_id)
+    if not queue['tracks']:
+        return False
+
+    if queue['current_index'] >= len(queue['tracks']):
+        queue['current_index'] = len(queue['tracks']) - 1
+
+    track = queue['tracks'][queue['current_index']]
+    try:
+        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+            info = ydl.extract_info(track['url'], download=False)
+            stream_url = info['url']
+            track['duration'] = int(info.get('duration') or 0)
+            track['thumbnail'] = info.get('thumbnail')
+
+        audio_source = discord.FFmpegPCMAudio(stream_url, executable=FFMPEG_PATH, **FFMPEG_OPTIONS)
+
+        def after_play(error):
+            if error:
+                print(f"Playback ended. Error: {error}")
+            bot.loop.call_soon_threadsafe(asyncio.create_task, playback_ended(guild_id, error))
+
+        voice_client.play(audio_source, after=after_play)
+        queue['track_start_time'] = time.time()
+        queue['accumulated_pause'] = 0.0
+        queue['pause_started_at'] = None
+        await start_now_playing_embed(guild_id)
+        return True
+    except Exception as e:
+        print(f"Failed to start playback: {e}")
+        return False
+
+async def playback_ended(guild_id: str, error=None):
+    queue = get_song_queue(guild_id)
+    if queue.get('stop_action'):
+        queue['stop_action'] = None
+        return
+
+    if queue['loop'] and queue['tracks']:
+        guild = bot.get_guild(int(guild_id))
+        voice_client = guild.voice_client if guild else None
+        if voice_client and voice_client.is_connected():
+            await play_guild_song(guild_id, voice_client)
+        return
+
+    is_last_track = queue['current_index'] + 1 >= len(queue['tracks'])
+    if is_last_track:
+        await refresh_now_playing_embed(guild_id)
+
+    queue['current_index'] += 1
+    if queue['current_index'] < len(queue['tracks']):
+        guild = bot.get_guild(int(guild_id))
+        voice_client = guild.voice_client if guild else None
+        if voice_client and voice_client.is_connected():
+            await play_guild_song(guild_id, voice_client)
+        return
+
+    return
+
+
 
 
 
@@ -148,19 +541,67 @@ local_rpc_queue = queue.Queue(maxsize=1)
 
 
 
-def load_levels():
-    if not os.path.exists(LEVEL_FILE):
-        return {}
-    with open(LEVEL_FILE, 'r') as f:
-        try:
+def load_json_file(path: str, default=None, recover_backup: bool = True):
+    if default is None:
+        default = {}
+
+    if not os.path.exists(path):
+        return default
+
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    except json.JSONDecodeError:
+        if recover_backup:
+            backup_path = path + '.bak'
+            if os.path.exists(backup_path):
+                try:
+                    with open(backup_path, 'r', encoding='utf-8') as backup_file:
+                        recovered = json.load(backup_file)
+                    save_json_file(path, recovered)
+                    print(f"Recovered {os.path.basename(path)} from backup after corruption.")
+                    return recovered
+                except (json.JSONDecodeError, OSError):
+                    pass
+        print(f"Warning: {os.path.basename(path)} is corrupted and could not be loaded. Returning default.")
+        return default
+    except OSError:
+        print(f"Warning: unable to read {os.path.basename(path)}. Returning default.")
+        return default
+
+
+def save_json_file(path: str, data, indent: int = 4):
+    temp_path = path + '.tmp'
+    backup_path = path + '.bak'
+
+    try:
+        with open(temp_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())
+
+        if os.path.exists(path):
+            try:
+                os.replace(path, backup_path)
+            except OSError:
+                pass
+
+        os.replace(temp_path, path)
+    except OSError as e:
+        print(f"Warning: unable to save {os.path.basename(path)}: {e}")
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
+
+
+def load_levels():
+    return load_json_file(LEVEL_FILE, {})
 
 
 def save_levels(data):
-    with open(LEVEL_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    save_json_file(LEVEL_FILE, data)
 
 
 def get_xp_needed(level: int) -> int:
@@ -168,33 +609,19 @@ def get_xp_needed(level: int) -> int:
 
 
 def load_data():
-    if not os.path.exists(DATA_FILE):
-        return {}
-    with open(DATA_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    return load_json_file(DATA_FILE, {})
 
 
 def save_data(data):
-    with open(DATA_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    save_json_file(DATA_FILE, data)
 
 
 def load_user_settings():
-    if not os.path.exists(USER_FILE):
-        return {}
-    with open(USER_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    return load_json_file(USER_FILE, {})
 
 
 def save_user_settings(data):
-    with open(USER_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    save_json_file(USER_FILE, data)
 
 
 def get_user_settings_entry(settings: dict, user_id: str) -> dict:
@@ -218,6 +645,31 @@ def get_user_color(user_id: str) -> str:
 def get_user_pings_enabled(user_id: str) -> bool:
     settings = load_user_settings()
     return get_user_settings_entry(settings, user_id).get("user_pings", True)
+
+
+def get_user_has_leveled_up_before(user_id: str) -> bool:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+
+    if "has_leveled_up_before" in user_settings:
+        return bool(user_settings["has_leveled_up_before"])
+
+    levels_data = load_levels()
+    for guild_data in levels_data.values():
+        users = guild_data.get("users", {})
+        user_data = users.get(str(user_id))
+        if isinstance(user_data, dict) and user_data.get("level", 0) > 0:
+            user_settings["has_leveled_up_before"] = True
+            save_user_settings(settings)
+            return True
+
+    return False
+
+
+def set_user_has_leveled_up_before(user_id: str, value: bool) -> None:
+    settings = load_user_settings()
+    get_user_settings_entry(settings, user_id)["has_leveled_up_before"] = value
+    save_user_settings(settings)
 
 
 def format_user_reference(user: discord.abc.User | discord.Member, settings: dict | None = None) -> str:
@@ -281,10 +733,10 @@ def start_local_rpc_worker():
                                   buttons=[{"label": "Git", "url": "https://github.com/ImNinnn/NinnnUtils"},{"label": "Support Server", "url": "https://discord.gg/FSBPvc9zqY"}]
                     )
                 except Exception as e:
-                    print(f"<:warning:1517452174991556758> Local RPC sync failed: {e}")
+                    print(f"Local RPC sync failed: {e}")
                     break
         except Exception as e:
-            print(f"<:warning:1517452174991556758> Local RPC sync failed: {e}")
+            print(f"Local RPC sync failed: {e}")
         finally:
             try:
                 if client is not None:
@@ -339,17 +791,14 @@ def close_local_rpc():
 
 
 def load_love_data():
-    if not os.path.exists(LOVE_FILE):
-        with open(LOVE_FILE, "w") as f:
-            json.dump({}, f)
+    if not os.path.exists(RATE_FILE):
+        save_json_file(RATE_FILE, {})
         return {}
-    with open(LOVE_FILE, "r") as f:
-        return json.load(f)
+    return load_json_file(RATE_FILE, {})
 
 
 def save_love_data(data):
-    with open(LOVE_FILE, "w") as f:
-        json.dump(data, f, indent=4)
+    save_json_file(RATE_FILE, data)
 
 
 def load_fun_data():
@@ -368,51 +817,35 @@ def save_fun_data(data):
 
 
 def load_board_data():
-    if not os.path.exists(BOARD_FILE):
-        return {}
-    with open(BOARD_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    return load_json_file(BOARD_FILE, {})
 
 
 def save_board_data(data):
-    with open(BOARD_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    save_json_file(BOARD_FILE, data)
 
 
 def load_guild_data():
-    if not os.path.exists(GUILD_FILE):
-        return {}
-    with open(GUILD_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
+    return load_json_file(GUILD_FILE, {})
 
 
 def save_guild_data(data):
-    with open(GUILD_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
+    save_json_file(GUILD_FILE, data)
 
 
 def load_lock_config():
     if not os.path.exists(LOCK_CONFIG_FILE):
         return {}, {}
-    with open(LOCK_CONFIG_FILE, 'r') as f:
-        try:
-            data = json.load(f)
-            locked = {int(k): v for k, v in data.get("locked_channels", {}).items()}
-            admin = {int(k): v for k, v in data.get("admin_log_channels", {}).items()}
-            return locked, admin
-        except (json.JSONDecodeError, ValueError):
-            return {}, {}
+    data = load_json_file(LOCK_CONFIG_FILE, {})
+    try:
+        locked = {int(k): v for k, v in data.get("locked_channels", {}).items()}
+        admin = {int(k): v for k, v in data.get("admin_log_channels", {}).items()}
+        return locked, admin
+    except (ValueError, AttributeError):
+        return {}, {}
 
 
 def save_lock_config(locked, admin):
-    with open(LOCK_CONFIG_FILE, 'w') as f:
-        json.dump({"locked_channels": locked, "admin_log_channels": admin}, f, indent=4)
+    save_json_file(LOCK_CONFIG_FILE, {"locked_channels": locked, "admin_log_channels": admin})
 
 
 def get_guild_config(guild_id: str) -> dict:
@@ -434,6 +867,122 @@ def get_guild_config(guild_id: str) -> dict:
                 data[guild_id][key] = value
     save_guild_data(data)
     return data[guild_id], data
+
+
+def format_channel_reference(guild: discord.Guild, channel_id) -> str:
+    if not channel_id:
+        return "None"
+    try:
+        ch_id = int(channel_id)
+    except (TypeError, ValueError):
+        return str(channel_id)
+    channel = guild.get_channel(ch_id)
+    return channel.mention if channel else f"<#{ch_id}>"
+
+
+def parse_channel_reference(guild: discord.Guild, reference: str) -> discord.abc.GuildChannel | None:
+    if not reference:
+        return None
+    ref = reference.strip()
+    if ref.startswith("<#") and ref.endswith(">"):
+        ref = ref[2:-1]
+    try:
+        channel_id = int(ref)
+    except ValueError:
+        return None
+    return guild.get_channel(channel_id)
+
+
+async def safe_edit_message(message: discord.Message, view: discord.ui.View):
+    try:
+        await message.edit(view=view)
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+
+async def safe_send(interaction: discord.Interaction, content: str, **kwargs):
+    try:
+        await interaction.response.send_message(content, **kwargs)
+    except discord.errors.InteractionResponded:
+        try:
+            await interaction.followup.send(content, **kwargs)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+    except (discord.NotFound, discord.HTTPException):
+        pass
+
+
+def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
+    return [cid for cid in admin_log_channels if guild.get_channel(cid) is not None]
+
+
+def get_guild_locked_channel_ids(guild: discord.Guild) -> list[int]:
+    return [cid for cid in locked_channels if guild.get_channel(cid) is not None]
+
+
+def get_guild_board_entries(guild_id: str) -> list[str]:
+    board_data = load_board_data()
+    entries = []
+    if guild_id in board_data:
+        for emoji_key, cfg in board_data[guild_id].items():
+            ch_id = cfg.get("channel_id")
+            required = cfg.get("required_count")
+            channel_repr = f"<#{ch_id}>" if ch_id else "Unknown"
+            req_text = f"required {required}" if required is not None else "required ?"
+            entries.append(f"{emoji_key} in {channel_repr} ({req_text})")
+    return entries
+
+
+def get_guild_counter_entries(guild: discord.Guild) -> list[str]:
+    guild_config, _ = get_guild_config(str(guild.id))
+    entries = []
+    for ch_key, cfg in guild_config.get("counter_channels", {}).items():
+        try:
+            ch_id = int(ch_key)
+            ch = guild.get_channel(ch_id)
+            ch_repr = ch.mention if ch else f"<#{ch_id}>"
+        except (TypeError, ValueError):
+            ch_repr = str(ch_key)
+        current_val = cfg.get("current_value", 0)
+        entries.append(f"{ch_repr}: {current_val}")
+    return entries
+
+
+def get_level_channel_id(guild_id: str):
+    levels = load_levels()
+    if guild_id in levels:
+        return levels[guild_id].get("config", {}).get("channel_id")
+    return None
+
+
+def set_level_channel(guild_id: str, channel_id: int | None):
+    levels = load_levels()
+    if guild_id not in levels:
+        levels[guild_id] = {"config": {}, "users": {}}
+    if "config" not in levels[guild_id]:
+        levels[guild_id]["config"] = {}
+    levels[guild_id]["config"]["channel_id"] = channel_id
+    save_levels(levels)
+
+
+def ensure_board_guild_config(guild_id: str):
+    board_data = load_board_data()
+    if guild_id not in board_data:
+        board_data[guild_id] = {}
+    return board_data
+
+
+def get_admin_log_channel_mentions(guild: discord.Guild) -> list[str]:
+    return [guild.get_channel(cid).mention for cid in admin_log_channels if guild.get_channel(cid) is not None]
+
+
+def get_locked_channel_mentions(guild: discord.Guild) -> list[str]:
+    return [guild.get_channel(cid).mention for cid in locked_channels if guild.get_channel(cid) is not None]
+
+
+def parse_bool_value(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized in {"yes", "y", "true", "1", "on"}
 
 
 def get_guild_data(data, guild_id):
@@ -641,13 +1190,27 @@ def is_server_owner(interaction: discord.Interaction):
     return interaction.user.id == interaction.guild.owner_id
 
 
+def guild_owner_bypasses_role_checks(interaction: discord.Interaction) -> bool:
+    return interaction.guild is not None and interaction.user.id == interaction.guild.owner_id
+
+
 def clean_cache():
     global message_cache, deleted_cache, edited_cache, bot_error_cache
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
     message_cache = [m for m in message_cache if now - m['time'] < timedelta(minutes=120)]
     deleted_cache = [m for m in deleted_cache if now - m['time'] < timedelta(minutes=120)]
     edited_cache = [m for m in edited_cache if now - m['time'] < timedelta(minutes=120)]
     bot_error_cache = [m for m in bot_error_cache if now - m['time'] < timedelta(minutes=120)]
+
+
+def discord_timestamp(dt: datetime, style: str = "f") -> str:
+    if isinstance(dt, datetime):
+        return f"<t:{int(dt.timestamp())}:{style}>"
+    return str(dt)
+
+
+def trim_cache(cache: list, max_len: int = 10) -> list:
+    return cache[-max_len:]
 
 
 def add_bot_error(interaction: discord.Interaction, error: Exception):
@@ -667,11 +1230,11 @@ def add_bot_error(interaction: discord.Interaction, error: Exception):
         "command_name": command_name,
         "error_type": type(error).__name__,
         "error_message": str(error) or "No error message provided",
-        "time": datetime.now(),
+        "time": datetime.now(timezone.utc),
     })
 
-    if len(bot_error_cache) > 100:
-        bot_error_cache = bot_error_cache[-100:]
+    if len(bot_error_cache) > 10:
+        bot_error_cache = bot_error_cache[-10:]
 
 
 def add_bot_error_entry(guild_id: int | None, channel_id: int | None, user, source: str, error: Exception):
@@ -687,11 +1250,11 @@ def add_bot_error_entry(guild_id: int | None, channel_id: int | None, user, sour
         "command_name": source,
         "error_type": type(error).__name__,
         "error_message": str(error) or "No error message provided",
-        "time": datetime.now(),
+        "time": datetime.now(timezone.utc),
     })
 
-    if len(bot_error_cache) > 100:
-        bot_error_cache = bot_error_cache[-100:]
+    if len(bot_error_cache) > 10:
+        bot_error_cache = bot_error_cache[-10:]
 
 
 def normalize_item(name: str) -> str:
@@ -769,8 +1332,7 @@ async def update_board(payload, emoji_str, remove_mode=False):
         attachment = message.attachments[0]
         if attachment.content_type and attachment.content_type.startswith("image/"):
             embed.set_image(url=attachment.url)
-    formatted_time = message.created_at.strftime("%b %d, %Y - %I:%M %p")
-    embed.set_footer(text=f"| {formatted_time}")
+    embed.timestamp = message.created_at
 
     content_text = f"{emoji_str} {current_count} in {message.jump_url}"
 
@@ -815,47 +1377,184 @@ async def update_board(payload, emoji_str, remove_mode=False):
 
 
 
-class ShopView(discord.ui.View):
-    def __init__(self, shop_items, guild_id):
-        super().__init__(timeout=None)
-        self.shop_items = shop_items
+class ShopView(discord.ui.LayoutView):
+    def __init__(self, shop_items, guild_id, user_id):
+        super().__init__(timeout=180)
+        self.shop_items = dict(shop_items)
         self.guild_id = guild_id
-        for item_name, info in shop_items.items():
-            self.add_buy_button(item_name, info)
+        self.user_id = user_id
+        self.current_page = 0
+        self.items_per_page = 5
+        self.build_components()
 
-    def add_buy_button(self, name, info):
-        button = discord.ui.Button(
-            label=f"Buy {name} (${info['price']})",
-            style=discord.ButtonStyle.primary,
-            custom_id=f"buy_{name}"
-        )
+    def build_components(self):
+        self.clear_items()
 
-        async def button_callback(interaction: discord.Interaction):
-            data = load_data()
-            user_data = get_user_data(data, self.guild_id, str(interaction.user.id))
-            price = info['price']
+        items = list(self.shop_items.items())
+        total_pages = max(1, (len(items) + self.items_per_page - 1) // self.items_per_page)
+        start = self.current_page * self.items_per_page
+        page_items = items[start:start + self.items_per_page]
 
-            if user_data["balance"] < price:
-                await interaction.response.send_message("<:disapprove:1517452151012589662> You can't afford this!", ephemeral=True)
-                return
+        container_parts = [
+            TextDisplay("## <:chalice:1517579767573123092> Server Shop"),
+            TextDisplay("Choose an item from the menu below and buy it with the button."),
+            Separator(),
+            TextDisplay(f"Page {self.current_page + 1}/{total_pages}"),
+        ]
 
-            user_data["balance"] -= price
-            inventory_add(user_data["inventory"], name)
-            save_data(data)
-            await interaction.response.send_message(f"<:approve:1517452125687513158> You bought **{name}**!", ephemeral=True)
+        for item_name, info in page_items:
+            buy_button = Button(
+                label=f"Buy ${info['price']}",
+                style=discord.ButtonStyle.primary,
+                custom_id=f"shop_buy:{item_name}",
+            )
 
-        button.callback = button_callback
-        self.add_item(button)
+            async def buy_callback(interaction: discord.Interaction, button: Button = None, item_name=item_name, info=info):
+                data = load_data()
+                user_data = get_user_data(data, self.guild_id, str(interaction.user.id))
+                price = info['price']
+
+                if user_data["balance"] < price:
+                    await interaction.response.send_message("<:disapprove:1517452151012589662> You can't afford this!", ephemeral=True)
+                    return
+
+                user_data["balance"] -= price
+                inventory_add(user_data["inventory"], item_name)
+                save_data(data)
+
+                self.build_components()
+                await interaction.response.edit_message(view=self)
+                await interaction.followup.send(f"<:approve:1517452125687513158> You bought **{item_name}**!", ephemeral=True)
+
+            buy_button.callback = buy_callback
+            container_parts.append(
+                Section(
+                    f"**{item_name}**\n{str(info.get('desc', 'No description provided')).strip() or 'No description provided'}",
+                    accessory=buy_button,
+                )
+            )
+
+        data = load_data()
+        user_data = get_user_data(data, self.guild_id, str(self.user_id))
+        balance = user_data.get("balance", 0)
+
+        container_parts.extend([
+            Separator(),
+            TextDisplay(f"<:money:1517580310395486239> Your balance: **${balance}**"),
+        ])
+
+        container = Container(*container_parts, accent_color=discord.Color.gold())
+        self.add_item(container)
+
+        prev_button = Button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="shop_prev", disabled=self.current_page == 0)
+        next_button = Button(label="Next", style=discord.ButtonStyle.secondary, custom_id="shop_next", disabled=self.current_page >= total_pages - 1)
+        close_button = Button(label="Close", style=discord.ButtonStyle.danger, custom_id="shop_close")
+
+        async def prev_callback(interaction: discord.Interaction):
+            if self.current_page > 0:
+                self.current_page -= 1
+                self.build_components()
+                await interaction.response.edit_message(view=self)
+
+        async def next_callback(interaction: discord.Interaction):
+            if self.current_page < total_pages - 1:
+                self.current_page += 1
+                self.build_components()
+                await interaction.response.edit_message(view=self)
+
+        async def close_callback(interaction: discord.Interaction):
+            for child in self.children:
+                child.disabled = True
+            await interaction.response.edit_message(view=self)
+
+        prev_button.callback = prev_callback
+        next_button.callback = next_callback
+        close_button.callback = close_callback
+        self.add_item(discord.ui.ActionRow(prev_button, next_button, close_button))
 
 
-class DeletedMediaView(discord.ui.View):
-    def __init__(self, media_messages, user_who_requested):
+class DeletedMessagesView(LayoutView):
+    def __init__(self, full_description: str, media_messages: list, requester):
         super().__init__(timeout=60)
+        self.full_description = full_description
         self.messages = media_messages
+        self.requester = requester
         self.index = 0
-        self.requester = user_who_requested
         self.revealed = False
-        self.update_button_states()
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+
+        body = self.full_description
+        gallery = None
+
+        if self.messages:
+            current_msg = self.messages[self.index]
+            content_text = current_msg.get('content') or "*[Media only]*"
+            media_text = current_msg['media'] if self.revealed else "Media hidden. Press Reveal Media to view."
+            body += (
+                f"\n\n---\n\n"
+                f"**Current media preview ({self.index + 1}/{len(self.messages)})**\n"
+                f"**{current_msg['author'].display_name}**: {content_text}\n"
+                f"-# Sent at {current_msg['created_at']}\n"
+                f"-# {media_text}"
+            )
+
+            if self.revealed:
+                gallery = MediaGallery()
+                gallery.add_item(media=current_msg['media'], description=f"{current_msg['author'].display_name} - deleted at {discord_timestamp(current_msg['created_at'])}")
+
+        container_items = [
+            TextDisplay("<:trash:1517497581058527404> Recent deleted messages"),
+            Separator(),
+            TextDisplay(body),
+        ]
+        if gallery is not None:
+            container_items.extend([Separator(), gallery])
+
+        container = Container(
+            *container_items,
+            accent_color=discord.Color.red(),
+        )
+        self.add_item(container)
+
+        if self.messages:
+            self.reveal_button = Button(label="Reveal Media", style=discord.ButtonStyle.danger, custom_id="deleted_media_reveal")
+            self.prev_button = Button(label="Previous media", style=discord.ButtonStyle.primary, custom_id="deleted_media_prev")
+            self.next_button = Button(label="Next media", style=discord.ButtonStyle.primary, custom_id="deleted_media_next")
+
+            async def reveal_callback(interaction: discord.Interaction):
+                if interaction.user != self.requester:
+                    await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can reveal media!", ephemeral=True)
+                    return
+                self.revealed = not self.revealed
+                self.build_components()
+                await interaction.response.edit_message(view=self)
+
+            async def prev_callback(interaction: discord.Interaction):
+                if interaction.user != self.requester:
+                    await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can flip pages!", ephemeral=True)
+                    return
+                if self.index > 0:
+                    self.index -= 1
+                    self.build_components()
+                    await interaction.response.edit_message(view=self)
+
+            async def next_callback(interaction: discord.Interaction):
+                if interaction.user != self.requester:
+                    await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can flip pages!", ephemeral=True)
+                    return
+                if self.index < len(self.messages) - 1:
+                    self.index += 1
+                    self.build_components()
+                    await interaction.response.edit_message(view=self)
+
+            self.reveal_button.callback = reveal_callback
+            self.prev_button.callback = prev_callback
+            self.next_button.callback = next_callback
+            self.update_button_states()
+            self.add_item(discord.ui.ActionRow(self.prev_button, self.reveal_button, self.next_button))
 
     def update_button_states(self):
         self.prev_button.disabled = (self.index == 0)
@@ -867,53 +1566,6 @@ class DeletedMediaView(discord.ui.View):
             self.reveal_button.label = f"Reveal Media ({self.index + 1}/{len(self.messages)})"
             self.reveal_button.style = discord.ButtonStyle.danger
 
-    def build_media_embed(self):
-        msg = self.messages[self.index]
-        if self.revealed:
-            text_content = msg['content'] if msg['content'] else "No text"
-            embed = discord.Embed(
-                title=f"<:trash:1517497581058527404> Media sent by {msg['author'].display_name}",
-                description=f"**{msg['author'].display_name}**: {text_content}\n-# Sent at {msg['created_at']}",
-                color=discord.Color.red()
-            )
-            embed.set_image(url=msg['media'])
-            return embed
-        return None
-
-    async def handle_page_update(self, interaction: discord.Interaction):
-        self.update_button_states()
-        embed = self.build_media_embed()
-        if embed:
-            await interaction.response.edit_message(content=None, embed=embed, view=self)
-        else:
-            await interaction.response.edit_message(content=self.main_text_layout, embed=self.main_embed_layout, view=self)
-
-    @discord.ui.button(label="Reveal Media", style=discord.ButtonStyle.danger)
-    async def reveal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.requester:
-            await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can reveal media!", ephemeral=True)
-            return
-        self.revealed = not self.revealed
-        await self.handle_page_update(interaction)
-
-    @discord.ui.button(label="Previous media", style=discord.ButtonStyle.primary)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.requester:
-            await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can flip pages!", ephemeral=True)
-            return
-        if self.index > 0:
-            self.index -= 1
-            await self.handle_page_update(interaction)
-
-    @discord.ui.button(label="Next media", style=discord.ButtonStyle.primary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user != self.requester:
-            await interaction.response.send_message("<:disapprove:1517452151012589662> Only the person who ran the command can flip pages!", ephemeral=True)
-            return
-        if self.index < len(self.messages) - 1:
-            self.index += 1
-            await self.handle_page_update(interaction)
-
     async def on_timeout(self):
         for item in self.children:
             item.disabled = True
@@ -922,6 +1574,18 @@ class DeletedMediaView(discord.ui.View):
                 await self.message.edit(view=self)
         except Exception:
             pass
+
+
+class V2InfoContainerView(LayoutView):
+    def __init__(self, title: str, description: str, accent_color: discord.Color):
+        super().__init__(timeout=180)
+        container = Container(
+            TextDisplay(title),
+            Separator(),
+            TextDisplay(description),
+            accent_color=accent_color,
+        )
+        self.add_item(container)
 
 
 
@@ -941,7 +1605,7 @@ async def on_voice_state_update(member, before, after):
     if before.channel and before.channel.id == voice_client.channel.id:
         human_members = [m for m in voice_client.channel.members if not m.bot]
         if len(human_members) == 0:
-            print(f"🤫 Voice channel empty in {member.guild.name}. Starting 30s leave timer...")
+            print(f"Voice channel empty in {member.guild.name}. Starting 30s leave timer...")
             await asyncio.sleep(30)
             if voice_client.channel:
                 current_humans = [m for m in voice_client.channel.members if not m.bot]
@@ -961,6 +1625,8 @@ async def on_ready():
     print(f"Serving {len(bot.guilds)} guild(s)")
     if not update_presence.is_running():
         update_presence.start()
+    if not voice_xp_tracker.is_running():
+        voice_xp_tracker.start()
     bot.loop.create_task(blacklist_startup_cleanup())
 
 
@@ -1000,6 +1666,7 @@ async def on_message(message):
     clean_cache()
 
     media_url = message.attachments[0].url if message.attachments else None
+    now = datetime.now(timezone.utc)
     message_cache.append({
         'id': message.id,
         'channel': message.channel.id,
@@ -1007,8 +1674,8 @@ async def on_message(message):
         'content': message.content,
         'media': media_url,
         'mentions': message.mentions,
-        'time': datetime.now(),
-        'created_at': datetime.now().strftime("%I:%M %p")
+        'time': now,
+        'created_at': now
     })
 
     if message.guild:
@@ -1044,7 +1711,7 @@ async def on_message_delete(message):
     for msg in message_cache:
         if msg['id'] == message.id:
             deleted_msg = msg.copy()
-            deleted_msg['deleted_at'] = datetime.now().strftime("%I:%M %p")
+            deleted_msg['deleted_at'] = datetime.now(timezone.utc)
 
             history_enabled = True
             ghost_enabled = False
@@ -1055,6 +1722,7 @@ async def on_message_delete(message):
 
             if history_enabled:
                 deleted_cache.append(deleted_msg)
+                deleted_cache = trim_cache(deleted_cache, max_len=10)
             if message.guild and not ghost_enabled:
                 break
 
@@ -1074,7 +1742,7 @@ async def on_message_delete(message):
                     if msg['content']:
                         embed.add_field(name="<:list:1517497572770451567> Deleted Content:", value=msg['content'], inline=False)
                     
-                    embed.set_footer(text=f"Sent at {msg['created_at']}")
+                    embed.timestamp = msg['created_at']
                     
                     channel = bot.get_channel(msg['channel'])
                     if channel:
@@ -1110,9 +1778,10 @@ async def on_message_edit(before, after):
                 edited_msg['old_content'] = before.content if before.content else "*(Empty original content)*"
                 edited_msg['new_content'] = after.content if after.content else "*(Empty edited content)*"
                 edited_msg['jump_url'] = after.jump_url
-                edited_msg['edited_at'] = datetime.now().strftime("%I:%M %p")
+                edited_msg['edited_at'] = datetime.now(timezone.utc)
                 
                 edited_cache.append(edited_msg)
+                edited_cache = trim_cache(edited_cache, max_len=10)
             
             msg['content'] = after.content
             break
@@ -1220,8 +1889,7 @@ async def on_raw_reaction_add(payload):
         attachment = message.attachments[0]
         if attachment.content_type and attachment.content_type.startswith("image/"):
             embed.set_image(url=attachment.url)
-    formatted_time = datetime.now().strftime("%b %d, %Y - %I:%M %p")
-    embed.set_footer(text=f"{formatted_time}")
+    embed.timestamp = datetime.now(timezone.utc)
 
     content_text = f"{emoji_str} {current_count} in {message.jump_url}"
 
@@ -1293,7 +1961,7 @@ async def on_raw_reaction_remove(payload):
             embed.set_author(name=f"{message.author.display_name}", icon_url=message.author.display_avatar.url)
             if message.attachments and message.attachments[0].content_type.startswith("image/"):
                 embed.set_image(url=message.attachments[0].url)
-            embed.set_footer(text=f"{datetime.now().strftime('%b %d, %Y - %I:%M %p')}")
+            embed.timestamp = datetime.now(timezone.utc)
             await board_message.edit(content=content_text, embed=embed)
         else:
             await board_message.delete()
@@ -1382,11 +2050,11 @@ async def update_presence():
 
     for guild in bot.guilds:
         if guild.id in BLACKLISTED_GUILDS:
-            print(f"<:prohibited:1517497579582132436> Loop Check: Found blacklisted guild: {guild.name} ({guild.id}). Leaving...")
+            print(f"Loop Check: Found blacklisted guild: {guild.name} ({guild.id}). Leaving...")
             try:
                 await guild.leave()
             except Exception as e:
-                print(f"<:disapprove:1517452151012589662> Failed to leave {guild.name}: {e}")
+                print(f"Failed to leave {guild.name}: {e}")
 
     load_dotenv(override=True)
     VERSION = os.getenv('BOT_VERSION')
@@ -1448,7 +2116,7 @@ async def on_guild_join(guild):
     raw_blacklist = os.getenv('SERVER_BLACKLIST', '')
     BLACKLISTED_GUILDS = [int(sid.strip()) for sid in raw_blacklist.split(',') if sid.strip().isdigit()]
     if guild.id in BLACKLISTED_GUILDS:
-        print(f"<:prohibited:1517497579582132436> Joined blacklisted guild: {guild.name} ({guild.id}). Leaving immediately...")
+        print(f"Joined blacklisted guild: {guild.name} ({guild.id}). Leaving immediately...")
         await guild.leave()
 
 
@@ -1472,6 +2140,71 @@ async def blacklist_startup_cleanup():
 # -------------------------------------------------------------------------------------------------------------
 
 
+
+
+@bot.tree.command(name="definition", description="Look up the dictionary definition of a word")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(word="The word you want to define")
+async def define_word(interaction: discord.Interaction, word: str):
+    await interaction.response.defer()
+    
+    clean_word = word.strip().lower()
+    url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean_word}"
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                
+                if response.status == 404:
+                    return await interaction.followup.send(
+                        f"<:dissaprouve:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!", 
+                        ephemeral=True
+                    )
+                
+                if response.status != 200:
+                    return await interaction.followup.send(
+                        "<:warning:1517452174991556758> The dictionary service is currently unavailable. Please try again later.", 
+                        ephemeral=True
+                    )
+                
+                data = await response.json()
+                
+        word_data = data[0]
+        word_name = word_data.get("word", clean_word).title()
+        phonetic = word_data.get("phonetic", "N/A")
+        
+        embed = discord.Embed(
+            title=f"<:list:1517497572770451567> Dictionary Definition: {word_name}",
+            description=f"**Phonetic:** `{phonetic}`",
+            color=discord.Color.blurple()
+        )
+        
+        meanings = word_data.get("meanings", [])
+        
+        for meaning in meanings[:3]:
+            part_of_speech = meaning.get("partOfSpeech", "unknown").upper()
+            definitions_list = meaning.get("definitions", [])
+            
+            def_text = ""
+            for idx, d_obj in enumerate(definitions_list[:2], start=1):
+                definition = d_obj.get("definition", "No definition given.")
+                def_text += f"**{idx}.** {definition}\n"
+                
+                example = d_obj.get("example")
+                if example:
+                    def_text += f"   *\" {example} \"*\n"
+            
+            if def_text:
+                embed.add_field(name=f"<:spark:1517583248421552305> {part_of_speech}", value=def_text, inline=False)
+                
+        embed.set_footer(text="Data sourced from Wiktionary API")
+        
+        await interaction.followup.send(embed=embed)
+        
+    except Exception as e:
+        print(f"Error executing /def command: {e}")
+        await interaction.followup.send("<:dissaprouve:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
 
 
 @bot.tree.command(name="encode-decode", description="Encode or decode text using various methods (Base64, Base32, Base16, Binary)")
@@ -1531,7 +2264,6 @@ async def encode_decode_command(interaction: discord.Interaction, text: str, enc
         embed.add_field(name=field_name, value=f"`{result}`", inline=False)
         embed.set_footer(text=f"Processed for {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
         await interaction.response.send_message(embed=embed)
-        print(f"Cipher Log: \"{interaction.user.name}\" performed {action} using {encoding_type}.")
 
     except Exception as e:
         await interaction.response.send_message(
@@ -1554,44 +2286,136 @@ async def translate(interaction: discord.Interaction, text: str, to_language: st
         translator = GoogleTranslator(source=from_language, target=to_language)
         translated_text = translator.translate(text)
         await interaction.followup.send(content=translated_text)
-        print(f"translation log : \"{interaction.user.name}\" translated \"{text}\" from {from_language} to \"{translated_text}\" in {to_language}")
     except Exception as e:
         await interaction.followup.send(f"<:disapprove:1517452151012589662> Translation failed. Please ensure you used valid ISO language codes! Error: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="voice-play", description="Connect to your voice channel and play a YouTube audio link")
+@bot.tree.command(name="song", description="Manage song playback and queue")
 @app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.describe(youtube_url="The YouTube video link (e.g., https://www.youtube.com/watch?v=...)")
-@app_commands.checks.cooldown(1, 30.0, key=lambda i: i.guild_id)
-async def voice_play(interaction: discord.Interaction, youtube_url: str):
-    if not interaction.user.voice or not interaction.user.voice.channel:
-        await interaction.response.send_message("<:disapprove:1517452151012589662> You must be in a voice channel to use this command!", ephemeral=True)
+@app_commands.describe(
+    action="What you want to do with the song queue",
+    youtube_url="The YouTube video link (required for add)",
+    position="Queue position to remove (required for remove)"
+)
+@app_commands.choices(
+    action=[
+        app_commands.Choice(name="Add", value="add"),
+        app_commands.Choice(name="Skip", value="skip"),
+        app_commands.Choice(name="Remove", value="remove"),
+    ]
+)
+async def song(
+    interaction: discord.Interaction,
+    action: str,
+    youtube_url: str = None,
+    position: int = None,
+):
+    guild_id = str(interaction.guild.id)
+    queue = get_song_queue(guild_id)
+
+    if action == "add":
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> You must be in a voice channel to add a song!", ephemeral=True)
+            return
+        if not youtube_url:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide a YouTube link to add.", ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        voice_channel = interaction.user.voice.channel
+        was_empty = len(queue['tracks']) == 0 or queue['current_index'] >= len(queue['tracks'])
+
+        try:
+            with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
+                info = ydl.extract_info(youtube_url, download=False)
+                video_title = info.get('title', 'Unknown Title')
+
+            voice_client = interaction.guild.voice_client
+            if voice_client is None:
+                voice_client = await voice_channel.connect()
+            elif voice_client.channel != voice_channel:
+                await voice_client.move_to(voice_channel)
+
+            queue['tracks'].append({
+                'url': youtube_url,
+                'title': video_title,
+                'requested_by': interaction.user.display_name
+            })
+
+            if was_empty and not voice_client.is_playing() and not voice_client.is_paused():
+                queue['current_index'] = len(queue['tracks']) - 1
+                queue['now_playing_channel_id'] = interaction.channel.id
+                if await play_guild_song(guild_id, voice_client):
+                    await interaction.followup.send(f"<:music:1517575582764765224> Now playing: **{video_title}** in {voice_channel.mention}!")
+                    return
+                await interaction.followup.send(f"<:disapprove:1517452151012589662> Failed to start playback for **{video_title}**.")
+                return
+
+            await interaction.followup.send(f"<:music:1517575582764765224> Added to queue: **{video_title}** (Position {len(queue['tracks'])})")
+
+        except Exception as e:
+            await interaction.followup.send(f"<:disapprove:1517452151012589662> Failed to add song. Error: {e}")
         return
 
-    await interaction.response.defer()
-    voice_channel = interaction.user.voice.channel
-
-    try:
-        with yt_dlp.YoutubeDL(YTDL_OPTIONS) as ydl:
-            info = ydl.extract_info(youtube_url, download=False)
-            stream_url = info['url']
-            video_title = info.get('title', 'Unknown Title')
-
+    if action == "skip":
         voice_client = interaction.guild.voice_client
-        if voice_client is None:
-            voice_client = await voice_channel.connect()
-        elif voice_client.channel != voice_channel:
-            await voice_client.move_to(voice_channel)
+        if not voice_client or not voice_client.is_connected():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel.", ephemeral=True)
+            return
+        if not queue['tracks']:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The queue is empty.", ephemeral=True)
+            return
 
-        if voice_client.is_playing():
+        if queue['current_index'] >= len(queue['tracks']):
+            queue['current_index'] = len(queue['tracks']) - 1
+
+        if queue['current_index'] + 1 < len(queue['tracks']):
+            queue['current_index'] += 1
+            queue['stop_action'] = 'manual'
             voice_client.stop()
+            await interaction.response.send_message(f"<:next:1518977801057865224> Skipped to **{queue['tracks'][queue['current_index']]['title']}**.")
+            await play_guild_song(guild_id, voice_client)
+            return
 
-        audio_source = discord.FFmpegPCMAudio(stream_url, executable=FFMPEG_PATH, **FFMPEG_OPTIONS)
-        voice_client.play(audio_source, after=lambda e: print(f"Playback ended. Error: {e}") if e else None)
-        await interaction.followup.send(f"<:music:1517575582764765224> Now playing: **{video_title}** in {voice_channel.mention}!")
+        queue['current_index'] = len(queue['tracks'])
+        queue['stop_action'] = 'manual'
+        voice_client.stop()
+        await cleanup_now_playing_embed(guild_id)
+        await interaction.response.send_message("<:disapprove:1517452151012589662> No more songs in the queue. Playback stopped.")
+        return
 
-    except Exception as e:
-        await interaction.followup.send(f"<:disapprove:1517452151012589662> Failed to play audio. Error: {e}")
+    if action == "remove":
+        if position is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide the queue position to remove.", ephemeral=True)
+            return
+        if not queue['tracks']:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The queue is empty.", ephemeral=True)
+            return
+        if position < 1 or position > len(queue['tracks']):
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid queue position.", ephemeral=True)
+            return
+
+        song_index = position - 1
+        removed = queue['tracks'].pop(song_index)
+        if song_index < queue['current_index']:
+            queue['current_index'] -= 1
+        elif song_index == queue['current_index']:
+            voice_client = interaction.guild.voice_client
+            if voice_client and voice_client.is_connected() and (voice_client.is_playing() or voice_client.is_paused()):
+                queue['stop_action'] = 'manual'
+                voice_client.stop()
+                if queue['current_index'] >= len(queue['tracks']):
+                    await cleanup_now_playing_embed(guild_id)
+                    await interaction.response.send_message(f"Removed **{removed['title']}** and stopped playback because the queue is now empty.")
+                    return
+                await interaction.response.send_message(f"Removed **{removed['title']}**. Now playing **{queue['tracks'][queue['current_index']]['title']}**.")
+                await play_guild_song(guild_id, voice_client)
+                return
+
+        await interaction.response.send_message(f"Removed **{removed['title']}** from the queue.")
+        return
+
+    await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid song action.", ephemeral=True)
 
 
 @bot.tree.command(name="voice-leave", description="Disconnect the bot from the voice channel")
@@ -1599,20 +2423,17 @@ async def voice_play(interaction: discord.Interaction, youtube_url: str):
 async def voice_leave(interaction: discord.Interaction):
     voice_client = interaction.guild.voice_client
     if voice_client:
+        guild_id = str(interaction.guild.id)
+        queue = get_song_queue(guild_id)
+        queue['tracks'].clear()
+        queue['current_index'] = 0
+        queue['loop'] = False
+        queue['stop_action'] = None
+        await cleanup_now_playing_embed(guild_id)
         await voice_client.disconnect()
-        await interaction.response.send_message("<:wave:1517576345603936296> Disconnected from the voice channel.")
+        await interaction.response.send_message("<:wave:1517576345603936296> Disconnected from the voice channel and cleared the queue.")
     else:
         await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel!", ephemeral=True)
-
-
-@bot.tree.command(name="version", description="Display the bot's version")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def ver(interaction: discord.Interaction):
-    VERSION = os.getenv('BOT_VERSION')
-    VERSION_ALTERNATE = os.getenv('BOT_VERSION_ALTERNATE')
-    ACTIVITY_TEXT = os.getenv('ACTIVITY')
-    await interaction.response.send_message(f"<:gear:1517576939097952496> Current version: {VERSION} | Alternate: {VERSION_ALTERNATE} | {ACTIVITY_TEXT}")
 
 
 @bot.tree.command(name="roll", description="Roll a 6-sided die")
@@ -1637,8 +2458,8 @@ async def random_cmd(interaction: discord.Interaction, min_value: int, max_value
 @app_commands.allowed_installs(guilds=True, users=False)
 async def serverinfo(interaction: discord.Interaction):
     guild = interaction.guild
-    created_at = guild.created_at.strftime("%m/%d/%Y %H:%M")
-    joined_at = interaction.user.joined_at.strftime("%m/%d/%Y %H:%M") if interaction.user.joined_at else "Unknown"
+    created_at = discord_timestamp(guild.created_at)
+    joined_at = discord_timestamp(interaction.user.joined_at) if interaction.user.joined_at else "Unknown"
     total_count = guild.member_count
     bot_count = len([m for m in guild.members if m.bot])
     human_count = total_count - bot_count
@@ -1661,6 +2482,100 @@ async def serverinfo(interaction: discord.Interaction):
     embed.add_field(name="<:warning:1517452174991556758> Total", value=str(total_count), inline=True)
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="channelinfo", description="Show configured channels from the bot's JSON settings for this server")
+@app_commands.allowed_installs(guilds=True, users=False)
+async def channelinfo(interaction: discord.Interaction):
+    if interaction.guild is None:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> This command must be used in a server.", ephemeral=True)
+        return
+
+    guild = interaction.guild
+    guild_id = str(guild.id)
+
+    guild_config, _ = get_guild_config(guild_id)
+    levels = load_levels()
+    board_data = load_board_data()
+    locked, admin_log = load_lock_config()
+
+    def fmt_channel(cid):
+        if not cid:
+            return "Not set"
+        try:
+            cid_int = int(cid)
+        except Exception:
+            return str(cid)
+        ch = guild.get_channel(cid_int)
+        if ch is not None:
+            return ch.mention
+        return f"<#{cid_int}>"
+
+    welcome = fmt_channel(guild_config.get("welcome_channel_id"))
+    goodbye = fmt_channel(guild_config.get("goodbye_channel_id"))
+
+    lvl_channel = "Not set"
+    if guild_id in levels:
+        lvl_channel_id = levels[guild_id].get("config", {}).get("channel_id")
+        if lvl_channel_id:
+            lvl_channel = fmt_channel(lvl_channel_id)
+
+    board_entries = []
+    if guild_id in board_data:
+        for emoji_key, cfg in board_data[guild_id].items():
+            ch_id = cfg.get("channel_id")
+            required = cfg.get("required_count") or cfg.get("required") or cfg.get("required_count", None)
+            channel_repr = fmt_channel(ch_id)
+            # prefer to show emoji (emoji_key) and required count
+            req_text = f"required {required}" if required is not None else "required ?"
+            board_entries.append(f"{emoji_key} in {channel_repr} ({req_text})")
+    board_channels = "\n".join(board_entries) if board_entries else "None"
+
+    counter_entries = []
+    counters = guild_config.get("counter_channels", {})
+    for ch_key, cfg in counters.items():
+        try:
+            ch = guild.get_channel(int(ch_key))
+            ch_repr = ch.mention if ch else f"<#{ch_key}"
+        except Exception:
+            ch_repr = str(ch_key)
+        current_val = cfg.get("current_value", 0)
+        counter_entries.append(f"{ch_repr}: {current_val}")
+    counter_channels = "\n".join(counter_entries) if counter_entries else "None"
+
+    admin_log_channels_list = []
+    if admin_log and isinstance(admin_log, dict):
+        for ch_id in admin_log.keys():
+            try:
+                ch = guild.get_channel(int(ch_id))
+                if ch:
+                    admin_log_channels_list.append(ch.mention)
+            except Exception:
+                continue
+    admin_log_channel = "\n".join(admin_log_channels_list) if admin_log_channels_list else "Not set"
+
+    locked_channels_list = []
+    if isinstance(locked, dict):
+        for ch_key in locked.keys():
+            try:
+                ch = guild.get_channel(int(ch_key))
+                if ch:
+                    locked_channels_list.append(ch.mention)
+            except Exception:
+                continue
+    locked_channels = "\n".join(locked_channels_list) if locked_channels_list else "None"
+
+    embed = discord.Embed(title=f"<:drawer:1517497564189036574> Configured Channels for {guild.name}", color=discord.Color.blurple())
+    embed.add_field(name="<:plus:1518348756570079262> Welcome Channel", value=welcome, inline=False)
+    embed.add_field(name="<:minus:1518348754111959150> Goodbye Channel", value=goodbye, inline=False)
+    embed.add_field(name="<:chalice:1517579767573123092> Level-up Announce Channel", value=lvl_channel, inline=False)
+    embed.add_field(name="<:graph:1517584522877866065> Board Channels", value=board_channels, inline=False)
+    embed.add_field(name="<:list:1517497572770451567> Counter Channels", value=counter_channels, inline=False)
+    embed.add_field(name="<:unlocked:1517574880034558102> Admin Log Channel", value=admin_log_channel, inline=False)
+    embed.add_field(name="<:locked:1517574877257924809> Locked Channels", value=locked_channels, inline=False)
+    embed.set_footer(text=f"Run /settings and go to channel settings to change these settings.")
+
     await interaction.response.send_message(embed=embed)
 
 
@@ -1833,6 +2748,17 @@ async def lie_menu(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.send_message(f"> This message is **{percentage}%** a Lie.\n-# **{message.author.display_name}:** {original_text}")
 
 
+@bot.tree.context_menu(name="Quote")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def quote_menu(interaction: discord.Interaction, message: discord.Message):
+    quote_file = await create_quote_card(message)
+    if quote_file is None:
+        await interaction.response.send_message("Unable to create quote image right now.", ephemeral=True)
+        return
+    await interaction.response.send_message(file=quote_file)
+
+
 @bot.tree.command(name="love", description="Check the compatibility between two things or users")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -1858,12 +2784,52 @@ async def love(interaction: discord.Interaction, item1: str, item2: str):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="ping", description="Check the bot's latency to Discord")
+@bot.tree.command(name="rate-cool", description="Rate how cool someone is")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def ping(interaction: discord.Interaction):
-    latency = round(bot.latency * 1000)
-    await interaction.response.send_message(f"<:gear:1517576939097952496> Pong! Latency is **{latency}ms**")
+@app_commands.describe(username="The person or thing to rate")
+async def rate_cool(interaction: discord.Interaction, username: str):
+    love_data = load_love_data()
+    guild_id = str(interaction.guild.id) if interaction.guild else "dm"
+    if guild_id not in love_data:
+        love_data[guild_id] = {}
+    cool_key = f"cool_{username.lower().strip()}"
+    if cool_key in love_data[guild_id]:
+        score = love_data[guild_id][cool_key]
+    else:
+        score = random.randint(1, 100)
+        love_data[guild_id][cool_key] = score
+        save_love_data(love_data)
+    filled = max(0, int(score / 10))
+    bar = "<:Square_Yellow:1517679899769311302>" * filled + "<:Square_Black:1517679889615032540>" * (10 - filled)
+    embed = discord.Embed(title="Coolness Rating <:spark:1517583248421552305>", color=discord.Color.yellow())
+    embed.add_field(name="User", value=username, inline=False)
+    embed.add_field(name="Coolness", value=f"**{score}%**\n{bar}", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+
+@bot.tree.command(name="rate-gay", description="Rate how gay someone is")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(username="The person or thing to rate")
+async def rate_gay(interaction: discord.Interaction, username: str):
+    love_data = load_love_data()
+    guild_id = str(interaction.guild.id) if interaction.guild else "dm"
+    if guild_id not in love_data:
+        love_data[guild_id] = {}
+    gay_key = f"gay_{username.lower().strip()}"
+    if gay_key in love_data[guild_id]:
+        score = love_data[guild_id][gay_key]
+    else:
+        score = random.randint(1, 100)
+        love_data[guild_id][gay_key] = score
+        save_love_data(love_data)
+    filled = max(0, int(score / 10))
+    bar = "<:Square_Blue:1517679890932043897>" * filled + "<:Square_Black:1517679889615032540>" * (10 - filled)
+    embed = discord.Embed(title="Gayness Rating <:rainbow:1518708398772846722>", color=discord.Color.blue())
+    embed.add_field(name="User", value=username, inline=False)
+    embed.add_field(name="Gayness", value=f"**{score}%**\n{bar}", inline=False)
+    await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="stats", description="Show bot statistics and status")
@@ -1874,7 +2840,6 @@ async def stats(interaction: discord.Interaction):
     VERSION = os.getenv('BOT_VERSION')
     VERSION_ALTERNATE = os.getenv('BOT_VERSION_ALTERNATE')
     ACTIVITY_TEXT = os.getenv('ACTIVITY')
-    total_members = sum(guild.member_count for guild in bot.guilds)
     total_guilds = len(bot.guilds)
     embed = discord.Embed(
         title="<:gear:1517576939097952496> Bot Statistics",
@@ -1883,7 +2848,7 @@ async def stats(interaction: discord.Interaction):
     )
     embed.set_thumbnail(url=bot.user.avatar.url if bot.user.avatar else bot.user.default_avatar.url)
     embed.add_field(name="<:internet:1518376144246804672> Servers", value=str(total_guilds), inline=True)
-    embed.add_field(name="<:graph:1517584522877866065> Total Users", value=str(total_members), inline=True)
+    embed.add_field(name="<:graph:1517584522877866065> Total Users", value=str(len(bot.users)), inline=True)
     embed.add_field(name="<:hourglass:1517574046252924938> Latency", value=f"{round(bot.latency * 1000)}ms", inline=True)
     embed.add_field(name="<:python:1518376147413635154> Library", value=f"discord.py {discord.__version__}", inline=True)
     embed.add_field(name="<:gear:1517576939097952496> Version", value=f"ver{VERSION} | alt{VERSION_ALTERNATE} | {ACTIVITY_TEXT}", inline=True)
@@ -1922,19 +2887,20 @@ async def coinflip(interaction: discord.Interaction):
 
 
 @bot.tree.command(name="avatar", description="Get the profile picture of a user")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
 @app_commands.describe(user="The user to get the avatar from")
 async def avatar(interaction: discord.Interaction, user: discord.Member = None):
     user = user or interaction.user
     embed = discord.Embed(title=f"{user.name}'s Avatar", color=discord.Color.blue())
     embed.set_image(url=user.display_avatar.url)
+    embed.set_footer(text="I wont be able to show the avatar if it is animated")
     await interaction.response.send_message(embed=embed)
 
 
 @bot.tree.command(name="banner", description="Get the profile banner of a user")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
 @app_commands.describe(user="The user to get the banner from")
 async def banner(interaction: discord.Interaction, user: discord.Member = None):
     user = user or interaction.user
@@ -1942,6 +2908,7 @@ async def banner(interaction: discord.Interaction, user: discord.Member = None):
     if full_user.banner:
         embed = discord.Embed(title=f"{user.name}'s Banner", color=discord.Color.blue())
         embed.set_image(url=full_user.banner.url)
+        embed.set_footer(text="I wont be able to show the banner if it is animated")
         await interaction.response.send_message(embed=embed)
     else:
         await interaction.response.send_message(f"{user.name} does not have a banner.", ephemeral=True)
@@ -2135,7 +3102,7 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, days
         await interaction.response.send_message("<:disapprove:1517452151012589662> Timeout cannot exceed 28 days.", ephemeral=True)
         return
 
-    if interaction.user != member and member.top_role >= interaction.user.top_role:
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != member and member.top_role >= interaction.user.top_role:
         await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot timeout someone with an equal or higher role than yours.", ephemeral=True)
         return
 
@@ -2175,53 +3142,6 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, days
 
 
 
-@bot.tree.command(name="toggle-ghost-pings", description="Enable or disable ghost ping notifications in this guild")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def ghost_toggle(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    guild_config, data = get_guild_config(guild_id)
-    
-    current_state = guild_config.get("ghost_ping_enabled", False)
-    new_state = not current_state
-    guild_config["ghost_ping_enabled"] = new_state
-    
-    save_guild_data(data)
-    
-    status_text = "<:approve:1517452125687513158> **Enabled**" if new_state else "<:disapprove:1517452151012589662> **Disabled**"
-    embed = discord.Embed(
-        title="<:ghost:1517497569939558470> Ghost Ping Notifications",
-        description=f"Ghost ping notifications are now {status_text}",
-        color=discord.Color.green() if new_state else discord.Color.red()
-    )
-    embed.set_footer(text="When enabled, the bot will notify users if someone pings them and then deletes the message (ghost ping).")
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-    print(f"<:ghost:1517497569939558470> Ghost ping notifications {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
-
-
-@bot.tree.command(name="toggle-history", description="Enable or disable /edited and /deleted history in this guild")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def history_toggle(interaction: discord.Interaction):
-    guild_id = str(interaction.guild.id)
-    guild_config, data = get_guild_config(guild_id)
-
-    current_state = guild_config.get("edit_delete_history_enabled", True)
-    new_state = not current_state
-    guild_config["edit_delete_history_enabled"] = new_state
-    save_guild_data(data)
-
-    status_text = "<:approve:1517452125687513158> **Enabled**" if new_state else "<:disapprove:1517452151012589662> **Disabled**"
-    embed = discord.Embed(
-        title="<:drawer:1517497564189036574> Edit/Delete History",
-        description=f"Edited and deleted message history is now {status_text} for this server.",
-        color=discord.Color.green() if new_state else discord.Color.red()
-    )
-    embed.set_footer(text="When disabled, /edited and /deleted commands will not show history and deleted/edited events will not be saved.")
-    await interaction.response.send_message(embed=embed, ephemeral=False)
-    print(f"<:drawer:1517497564189036574> Edit/Delete history {'enabled' if new_state else 'disabled'} in {interaction.guild.name}")
-
-
 @bot.tree.command(name="deleted", description="View recently deleted messages and media")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def deleted(interaction: discord.Interaction, user: discord.Member = None):
@@ -2245,24 +3165,22 @@ async def deleted(interaction: discord.Interaction, user: discord.Member = None)
         if m['media']:
             media_only_messages.append(m)
         content_text = m['content'] if m['content'] else "*[Media or Embed]*"
-        description_lines.append(f"{media_indicator}**{m['author'].display_name}**: {content_text}\n-# Sent at {m['created_at']}")
+        description_lines.append(f"{media_indicator}**{m['author'].display_name}**: {content_text}\n-# Sent at {discord_timestamp(m['created_at'])}")
 
     full_description = "\n\n".join(description_lines)
-    main_embed = discord.Embed(
-        title="<:trash:1517497581058527404> Recent deleted messages:",
-        description=full_description,
-        color=discord.Color.red()
-    )
 
     if media_only_messages:
         media_only_messages.sort(key=lambda x: x['time'], reverse=True)
-        view = DeletedMediaView(media_only_messages, interaction.user)
-        view.main_text_layout = "Recent deleted messages:"
-        view.main_embed_layout = main_embed
-        await interaction.response.send_message(embed=main_embed, view=view)
+        view = DeletedMessagesView(full_description, media_only_messages, interaction.user)
+        await interaction.response.send_message(view=view)
         view.message = await interaction.original_response()
     else:
-        await interaction.response.send_message(embed=main_embed)
+        view = V2InfoContainerView(
+            "<:trash:1517497581058527404> Recent deleted messages:",
+            full_description,
+            discord.Color.red(),
+        )
+        await interaction.response.send_message(view=view)
 
 
 @bot.tree.command(name="edited", description="Show recently edited messages in this channel")
@@ -2287,17 +3205,16 @@ async def edited_command(interaction: discord.Interaction, user: discord.Member 
 
     text_layout = ""
     for msg in channel_edited[:7]:
-        text_layout += f"**{msg['author'].display_name}**: ~~{msg['old_content']}~~ ➔ {msg['new_content']}\n-# Edited at {msg['edited_at']} | [Jump to Message]({msg['jump_url']})\n\n"
+        text_layout += f"**{msg['author'].display_name}**: ~~{msg['old_content']}~~ ➔ {msg['new_content']}\n-# Edited at {discord_timestamp(msg['edited_at'])} | [Jump to Message]({msg['jump_url']})\n\n"
 
     title_text = "<:edit:1517497568421085256> Recently Edited Messages"
 
-    embed_layout = discord.Embed(
-        title=title_text,
-        description=text_layout,
-        color=discord.Color.orange()
+    view = V2InfoContainerView(
+        title_text,
+        text_layout,
+        discord.Color.orange(),
     )
-
-    await interaction.response.send_message(embed=embed_layout)
+    await interaction.response.send_message(view=view)
 
 
 @bot.tree.command(name="errors", description="Show recent bot errors in this server")
@@ -2329,16 +3246,15 @@ async def errors(interaction: discord.Interaction):
         description_lines.append(
             f"**{entry.get('command_name', 'unknown command')}** in {channel_text} by {user_text}\n"
             f"-# {entry.get('error_type', 'Error')}: {error_message}\n"
-            f"-# At {entry['time'].strftime('%I:%M %p')}"
+            f"-# At {discord_timestamp(entry['time'])}"
         )
 
-    embed = discord.Embed(
-        title="<:warning:1517452174991556758> Recent Bot Errors",
-        description="\n\n".join(description_lines),
-        color=discord.Color.red()
+    view = V2InfoContainerView(
+        "<:warning:1517452174991556758> Recent Bot Errors",
+        f"Showing latest {len(recent_errors)} of {len(guild_errors)} error(s).\n\n" + "\n\n".join(description_lines),
+        discord.Color.red(),
     )
-    embed.set_footer(text=f"Showing latest {len(recent_errors)} of {len(guild_errors)} error(s).")
-    await interaction.response.send_message(embed=embed)
+    await interaction.response.send_message(view=view)
 
 
 @bot.tree.command(name="forget", description="Clear your messages from the bot's memory")
@@ -2373,37 +3289,10 @@ async def adm_forget(interaction: discord.Interaction, user: discord.Member):
 
 
 # -------------------------------------------------------------------------------------------------------------
-#                                               Counter And Reply Commands
+#                                               Counter command, its alone now ]: poor thing 😭 all his friends moved to /settings 😭😭😭
 # -------------------------------------------------------------------------------------------------------------
 
 
-
-
-@bot.tree.command(name="counter-channel-set", description="Enable counting in a channel and optionally reset on fail")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    channel="The text channel where counting will happen",
-    reset_when_fail="If enabled, the current counter resets when someone fails"
-)
-async def counter_channel_set(interaction: discord.Interaction, channel: discord.TextChannel, reset_when_fail: bool = False):
-    set_counter_channel(str(interaction.guild.id), channel.id, reset_when_fail)
-    status_text = "resets on fail" if reset_when_fail else "does not reset on fail"
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Counter enabled in {channel.mention} and {status_text}.", ephemeral=False)
-
-
-@bot.tree.command(name="counter-del", description="Disable counting in a channel")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    channel="The channel where counting should be disabled"
-)
-async def counter_del(interaction: discord.Interaction, channel: discord.TextChannel):
-    removed = remove_counter_channel(str(interaction.guild.id), channel.id)
-    if removed:
-        await interaction.response.send_message(f"<:approve:1517452125687513158> Counter disabled in {channel.mention}.", ephemeral=False)
-    else:
-        await interaction.response.send_message(f"<:warning:1517452174991556758> That channel does not have an active counter.", ephemeral=True)
 
 
 @bot.tree.command(name="counter-number-set", description="Set the current count in a counter channel")
@@ -2421,58 +3310,6 @@ async def counter_number_set(interaction: discord.Interaction, channel: discord.
         await interaction.response.send_message(f"<:warning:1517452174991556758> That channel does not have an active counter.", ephemeral=True)
 
 
-@bot.tree.command(name="auto-reply", description="Add a trigger word and random responses for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    word="The word that triggers the bot",
-    reply1="Mandatory first response",
-    reply2="Optional second response",
-    reply3="Optional third response",
-    reply4="Optional fourth response"
-)
-async def auto_reply(interaction: discord.Interaction, word: str, reply1: str, reply2: str = None, reply3: str = None, reply4: str = None):
-    guild_id = str(interaction.guild.id)
-    trigger_word = word.lower()
-    replies = [r for r in [reply1, reply2, reply3, reply4] if r is not None]
-    fun_data = load_fun_data()
-    if guild_id not in fun_data:
-        fun_data[guild_id] = {}
-    fun_data[guild_id][trigger_word] = replies
-    save_fun_data(fun_data)
-    embed = discord.Embed(
-        title="<:spark:1517583248421552305> Fun Reply Added!",
-        description=f"Whenever someone says **{word}** in this server, I will randomly reply with one of these:",
-        color=discord.Color.purple()
-    )
-    for i, r in enumerate(replies, 1):
-        embed.add_field(name=f"Reply {i}", value=r, inline=False)
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="auto-reply-clear", description="Remove a trigger word from this server's fun system")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(word="The trigger word you want to delete")
-async def auto_reply_clear(interaction: discord.Interaction, word: str):
-    guild_id = str(interaction.guild.id)
-    trigger_word = word.lower()
-    fun_data = load_fun_data()
-    if guild_id in fun_data and trigger_word in fun_data[guild_id]:
-        del fun_data[guild_id][trigger_word]
-        if not fun_data[guild_id]:
-            del fun_data[guild_id]
-        save_fun_data(fun_data)
-        embed = discord.Embed(
-            title="<:trash:1517497581058527404> Trigger Cleared",
-            description=f"Successfully removed the word **{word}** from this server's auto-reply system.",
-            color=discord.Color.red()
-        )
-        await interaction.response.send_message(embed=embed)
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> '{word}' isn't registered as a fun reply trigger in this server.", ephemeral=True)
-
-
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -2480,50 +3317,6 @@ async def auto_reply_clear(interaction: discord.Interaction, word: str):
 # -------------------------------------------------------------------------------------------------------------
 
 
-
-
-@bot.tree.command(name="board-add", description="Set up a reaction board for an emoji")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    emoji="The emoji to watch for (standard or custom)",
-    required_count="Number of reactions needed to post to the board",
-    channel="The channel where board messages will be sent"
-)
-async def board_add(interaction: discord.Interaction, emoji: str, required_count: int, channel: discord.TextChannel):
-    guild_id = str(interaction.guild.id)
-    board_data = load_board_data()
-    if guild_id not in board_data:
-        board_data[guild_id] = {}
-    board_data[guild_id][emoji] = {
-        "channel_id": channel.id,
-        "required_count": required_count,
-        "tracked_messages": {}
-    }
-    save_board_data(board_data)
-    embed = discord.Embed(
-        title="<:list:1517497572770451567> Board Configured!",
-        description=f"When a message gets {required_count} {emoji} reactions, it will be sent to {channel.mention}.",
-        color=discord.Color.green()
-    )
-    await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="board-del", description="Delete a reaction board configuration")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(emoji="The emoji board you want to remove")
-async def board_del(interaction: discord.Interaction, emoji: str):
-    guild_id = str(interaction.guild.id)
-    board_data = load_board_data()
-    if guild_id in board_data and emoji in board_data[guild_id]:
-        del board_data[guild_id][emoji]
-        if not board_data[guild_id]:
-            del board_data[guild_id]
-        save_board_data(board_data)
-        await interaction.response.send_message(f"<:trash:1517497581058527404> Successfully removed the board for {emoji}.")
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> No board configuration found for {emoji} in this server.", ephemeral=True)
 
 
 
@@ -2570,15 +3363,6 @@ async def unlock_command(interaction: discord.Interaction):
         await interaction.response.send_message("<:unlocked:1517574880034558102> Channel unlocked.")
     else:
         await interaction.response.send_message("<:warning:1517452174991556758> This channel is not currently locked.", ephemeral=True)
-
-
-@bot.tree.command(name="lock-adminadd", description="Enable admin logging in this channel.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def adminadd_command(interaction: discord.Interaction):
-    admin_log_channels[interaction.channel_id] = True
-    save_lock_config(locked_channels, admin_log_channels)
-    await interaction.response.send_message("<:list:1517497572770451567> Logging enabled in this channel.")
 
 
 @bot.tree.command(name="lock-adminstop", description="Stop admin logging in this channel.")
@@ -2632,53 +3416,13 @@ async def resume_command(interaction: discord.Interaction, channel: discord.Text
 
 
 
-@bot.tree.command(name="welcome-add", description="Set the channel for welcome images")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def welcome_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["welcome_channel_id"] = channel.id
-    save_guild_data(data)
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Welcome images will now be sent to {channel.mention}")
-
-
-@bot.tree.command(name="welcome-del", description="Disable welcome images for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def welcome_del(interaction: discord.Interaction):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["welcome_channel_id"] = None
-    save_guild_data(data)
-    await interaction.response.send_message("<:approve:1517452125687513158> Welcome images have been disabled.")
-
-
-@bot.tree.command(name="goodbye-add", description="Set the channel for goodbye images")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def goodbye_add(interaction: discord.Interaction, channel: discord.TextChannel):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["goodbye_channel_id"] = channel.id
-    save_guild_data(data)
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Goodbye images will now be sent to {channel.mention}")
-
-
-@bot.tree.command(name="goodbye-del", description="Disable goodbye images for this server")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def goodbye_del(interaction: discord.Interaction):
-    guild_config, data = get_guild_config(str(interaction.guild.id))
-    guild_config["goodbye_channel_id"] = None
-    save_guild_data(data)
-    await interaction.response.send_message("<:approve:1517452125687513158> Goodbye images have been disabled.")
-
-
 async def create_welcome_card(member):
     base_path = os.path.dirname(__file__)
     bg_path = os.path.join(base_path, "welcome_bg.png")
     font_path = os.path.join(base_path, "Minecraft.ttf")
 
     if not os.path.exists(bg_path):
-        print(f"<:disapprove:1517452151012589662> Background not found at: {bg_path}")
+        print(f"Background not found at: {bg_path}")
         return None
 
     background = Image.open(bg_path).convert("RGBA")
@@ -2694,7 +3438,7 @@ async def create_welcome_card(member):
         font_small = ImageFont.truetype(font_path, 15)
         font_medium = ImageFont.truetype(font_path, 25)
     except Exception as e:
-        print(f"<:warning:1517452174991556758> Font error: {e}. Using default.")
+        print(f"Font error: {e}. Using default.")
         font_big = ImageFont.load_default()
         font_small = ImageFont.load_default()
         font_medium = ImageFont.load_default()
@@ -2716,7 +3460,7 @@ async def create_goodbye_card(member):
     font_path = os.path.join(base_path, "Minecraft.ttf")
 
     if not os.path.exists(bg_path):
-        print(f"<:disapprove:1517452151012589662> Goodbye background not found at: {bg_path}")
+        print(f"Goodbye background not found at: {bg_path}")
         return None
 
     background = Image.open(bg_path).convert("RGBA")
@@ -2732,7 +3476,7 @@ async def create_goodbye_card(member):
         font_small = ImageFont.truetype(font_path, 15)
         font_medium = ImageFont.truetype(font_path, 25)
     except Exception as e:
-        print(f"<:warning:1517452174991556758> Font error: {e}. Using default.")
+        print(f"Font error: {e}. Using default.")
         font_big = ImageFont.load_default()
         font_small = ImageFont.load_default()
         font_medium = ImageFont.load_default()
@@ -2746,6 +3490,166 @@ async def create_goodbye_card(member):
     background.save(buffer, format="PNG")
     buffer.seek(0)
     return discord.File(buffer, filename="goodbye.png")
+
+def wrap_text(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+    lines = []
+    for paragraph in text.splitlines() or [""]:
+        if not paragraph:
+            lines.append("")
+            continue
+
+        words = paragraph.split(' ')
+        if not words:
+            lines.append("")
+            continue
+
+        current_line = words[0]
+        for word in words[1:]:
+            test_line = f"{current_line} {word}"
+            if draw.textbbox((0, 0), test_line, font=font)[2] <= max_width:
+                current_line = test_line
+            else:
+                lines.append(current_line)
+                current_line = word
+        lines.append(current_line)
+
+    return lines
+
+
+async def create_quote_card(message: discord.Message):
+    base_path = os.path.dirname(__file__)
+    bg_path = os.path.join(base_path, "Quote_bg.png")
+    fg_path = os.path.join(base_path, "Quote_fg.png")
+    font_path = os.path.join(base_path, "Minecraft.ttf")
+
+    if not os.path.exists(bg_path) or not os.path.exists(fg_path):
+        print(f"Quote background or foreground not found at: {bg_path}, {fg_path}")
+        return None
+
+    background = Image.open(bg_path).convert("RGBA")
+    foreground = Image.open(fg_path).convert("RGBA")
+    avatar_bytes = await message.author.display_avatar.with_format("png").read()
+
+    with Image.open(io.BytesIO(avatar_bytes)) as avatar:
+        avatar = avatar.convert("RGBA").resize((200, 200))
+        avatar = ImageOps.grayscale(avatar).convert("RGBA")
+        background.paste(avatar, (20, 20), avatar)
+
+    background = Image.alpha_composite(background, foreground)
+    draw = ImageDraw.Draw(background)
+
+    try:
+        font_big = ImageFont.truetype(font_path, 24)
+        font_quote_small = ImageFont.truetype(font_path, 20)
+        font_small = ImageFont.truetype(font_path, 16)
+        font_body = ImageFont.truetype(font_path, 18)
+        font_display = ImageFont.truetype(font_path, 20)
+    except Exception as e:
+        print(f"Font error: {e}. Using default.")
+        font_big = ImageFont.load_default()
+        font_quote_small = ImageFont.load_default()
+        font_small = ImageFont.load_default()
+        font_body = ImageFont.load_default()
+        font_display = ImageFont.load_default()
+
+    display_name_is_ascii = not any(ord(char) > 127 for char in message.author.display_name)
+    display_name_text = f"- {message.author.display_name if display_name_is_ascii else message.author.name}"
+    username_text = f"@{message.author.name}"
+    show_username = display_name_is_ascii
+
+    original_content = message.content.strip() or "[Embed or media content]"
+    content_text = original_content
+    content_text = content_text.replace('\n', ' ')
+    content_text = content_text.replace('"', '\\"')
+    had_non_ascii = any(ord(char) > 127 for char in original_content)
+    content_text = unicodedata.normalize('NFKD', content_text)
+    content_text = content_text.encode('ascii', 'ignore').decode('ascii')
+    content_text = f'"{content_text}"'
+
+    bg_width, bg_height = background.size
+    text_x = 250
+    text_y = 35
+    max_text_width = min(400, bg_width - text_x - 30)
+    footer_y = bg_height - 44
+
+    quote_font_size = 24
+    quote_font = font_big
+    lines = wrap_text(content_text, draw, quote_font, max_text_width)
+
+    if len(lines) > 4:
+        quote_font_size = max(12, 24 - 4 * (len(lines) - 4))
+        quote_font = ImageFont.truetype(font_path, quote_font_size)
+        lines = wrap_text(content_text, draw, quote_font, max_text_width)
+        if len(lines) > 4:
+            quote_font_size = max(12, 24 - 4 * (len(lines) - 4))
+            quote_font = ImageFont.truetype(font_path, quote_font_size)
+            lines = wrap_text(content_text, draw, quote_font, max_text_width)
+
+    line_height = int(getattr(quote_font, 'size', quote_font_size) * 1.4)
+    max_lines = max(1, (footer_y - text_y) // line_height)
+    truncated = False
+    if len(lines) > max_lines:
+        truncated = True
+        if quote_font_size == 12:
+            visible = lines[:max_lines]
+            ellipsis = "..."
+            while ellipsis and draw.textbbox((0, 0), ellipsis, font=quote_font)[2] > max_text_width:
+                ellipsis = ellipsis[:-1]
+
+            last = visible[-1]
+            if ellipsis:
+                while last and draw.textbbox((0, 0), last + ellipsis, font=quote_font)[2] > max_text_width:
+                    last = last[:-1]
+                last = last.rstrip()
+                if not last:
+                    visible[-1] = ellipsis
+                else:
+                    visible[-1] = last + ellipsis
+            else:
+                while last and draw.textbbox((0, 0), last, font=quote_font)[2] > max_text_width:
+                    last = last[:-1]
+                visible[-1] = last
+
+            lines = visible
+        else:
+            lines = lines[:max_lines]
+
+    for line in lines:
+        draw.text((text_x, text_y), line, fill=(255, 255, 255), font=quote_font)
+        text_y += line_height
+
+    display_bbox = draw.textbbox((0, 0), display_name_text, font=font_display)
+    footer_y = bg_height - 44
+    username_y = footer_y - 4
+    display_y = username_y
+
+    draw.text((text_x, display_y), display_name_text, fill=(255, 255, 255), font=font_display)
+    if show_username:
+        username_bbox = draw.textbbox((0, 0), username_text, font=font_small)
+        username_x = bg_width - 30 - (username_bbox[2] - username_bbox[0])
+        draw.text((username_x, username_y), username_text, fill=(100, 100, 100), font=font_small)
+
+    notices = []
+    if 'had_non_ascii' in locals() and had_non_ascii:
+        notices.append("ASCII Error")
+    if truncated:
+        notices.append("Size Error")
+
+    if notices:
+        notice_text = " | ".join(notices)
+        try:
+            notice_font = ImageFont.truetype(font_path, 12)
+        except Exception:
+            notice_font = font_small
+        notice_color = (255, 60, 60)
+        notice_x = 25
+        notice_y = footer_y - -5
+        draw.text((notice_x, notice_y), notice_text, fill=notice_color, font=notice_font)
+
+    buffer = io.BytesIO()
+    background.save(buffer, format="PNG")
+    buffer.seek(0)
+    return discord.File(buffer, filename="quote.png")
 
 
 
@@ -2791,12 +3695,10 @@ async def eco_leaderboard(interaction: discord.Interaction, limit: int = 10):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="eco-balance", description="Check your balance (or another user's if owner)")
+@bot.tree.command(name="eco-balance", description="Check your balance or another user's balance")
 @app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.describe(user="The user you want to check (Owner only)")
+@app_commands.describe(user="The user whose balance you want to check")
 async def eco_balance(interaction: discord.Interaction, user: discord.Member = None):
-    if user and interaction.user.id != interaction.guild.owner_id:
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Only the server owner can check other users' balances!", ephemeral=True)
     target = user or interaction.user
     data = load_data()
     money = data.get(str(interaction.guild.id), {}).get("users", {}).get(str(target.id), {}).get("balance", 0)
@@ -2840,46 +3742,15 @@ async def eco_shop(interaction: discord.Interaction):
     if not shop_items:
         await interaction.response.send_message("The shop is currently empty!")
         return
-    embed = discord.Embed(title="<:chalice:1517579767573123092> Server Shop", color=discord.Color.gold())
-    embed.description = "Click a button below to purchase an item! \n ~~───────────────────────────~~"
-    for item, info in shop_items.items():
-        embed.add_field(name=f"{item} - ${info['price']}", value=info['desc'], inline=False)
-    await interaction.response.send_message(embed=embed, view=ShopView(shop_items, str(interaction.guild.id)))
+
+    view = ShopView(shop_items, str(interaction.guild.id), str(interaction.user.id))
+    await interaction.response.send_message(view=view)
 
 
-@bot.tree.command(name="eco-shop-add", description="Add an item to the shop")
+@bot.tree.command(name="eco-inventory", description="Check your inventory or another user's inventory")
 @app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_shop_add(interaction: discord.Interaction, name: str, desc: str, price: int):
-    name = normalize_item(name)
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    guild["shop"][name] = {"desc": desc, "price": price}
-    save_data(data)
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Added **{name}** to the shop!")
-
-
-@bot.tree.command(name="eco-shop-del", description="Remove an item from the shop")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_shop_del(interaction: discord.Interaction, name: str):
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    canonical = find_item_key(guild["shop"], name)
-    if canonical:
-        del guild["shop"][canonical]
-        save_data(data)
-        await interaction.response.send_message(f"<:approve:1517452125687513158> Removed **{canonical}** from the shop.")
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> **{name}** was not found in the shop.", ephemeral=True)
-
-
-@bot.tree.command(name="eco-inventory", description="Check your inventory (or another user's if owner)")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.describe(user="The user you want to check (Owner only)")
+@app_commands.describe(user="The user whose inventory you want to check")
 async def eco_inventory(interaction: discord.Interaction, user: discord.Member = None):
-    if user and interaction.user.id != interaction.guild.owner_id:
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Only the server owner can check others' inventories.", ephemeral=True)
     target = user or interaction.user
     data = load_data()
     user_data = get_user_data(data, str(interaction.guild.id), str(target.id))
@@ -3019,7 +3890,7 @@ class MinesButton(discord.ui.Button):
         view.action_taken = True
         if self.index in view.mine_positions:
             self.style = discord.ButtonStyle.danger
-            self.label = "<:explosive:1517578642723573880>"
+            self.label = "💣"
             self.disabled = True
             view.reveal_board()
             view.finished = True
@@ -3150,7 +4021,7 @@ class MinesGameView(discord.ui.View):
                 if item.index in self.mine_positions:
                     item.disabled = True
                     item.style = discord.ButtonStyle.danger
-                    item.label = "<:explosive:1517578642723573880>"
+                    item.label = "💣"
                 else:
                     item.disabled = True
 
@@ -3837,22 +4708,6 @@ async def game_work(interaction: discord.Interaction, difficulty: str = "normal"
 
 
 
-@bot.tree.command(name="eco-craft-add", description="Add a recipe (Owner Only)")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_craft_add(interaction: discord.Interaction, item: str, req1_name: str, req1_count: int, req2_name: str = None, req2_count: int = 0, delay: int = 0):
-    item = normalize_item(item)
-    req1_name = normalize_item(req1_name)
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    recipe = {"reqs": {req1_name: req1_count}, "delay": delay}
-    if req2_name:
-        recipe["reqs"][normalize_item(req2_name)] = req2_count
-    guild["recipes"][item] = recipe
-    save_data(data)
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Added recipe: **{item}** (Time: {delay}s).")
-
-
 @bot.tree.command(name="eco-craft", description="Craft an item")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_craft(interaction: discord.Interaction, item: str, amount: int = 1):
@@ -3881,86 +4736,6 @@ async def eco_craft(interaction: discord.Interaction, item: str, amount: int = 1
     inventory_add(user_data["inventory"], canonical_item, amount)
     save_data(data)
     await interaction.followup.send(f"<:approve:1517452125687513158> Finished crafting {amount}x **{canonical_item}**!")
-
-
-@bot.tree.command(name="eco-craft-del", description="Remove a recipe (Owner Only)")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_craft_del(interaction: discord.Interaction, item: str):
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    canonical = find_item_key(guild["recipes"], item)
-    if canonical:
-        del guild["recipes"][canonical]
-        save_data(data)
-        await interaction.response.send_message(f"<:trash:1517497581058527404> Removed recipe for **{canonical}**.")
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> No recipe found for **{item}**.", ephemeral=True)
-
-
-@bot.tree.command(name="eco-use-add", description="Add usage effect (including giving an item or XP)")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-@app_commands.describe(
-    item="The item whose use effect you want to define",
-    money="Money reward granted when the item is used",
-    xp="XP reward granted when the item is used",
-    message="Custom response message after using the item",
-    role="Role to grant when the item is used",
-    temp_role="Temporary role to grant when the item is used",
-    duration="Length of the temporary role in seconds",
-    delay="Delay before the use effect completes",
-    instant_message="Message to send immediately before delay",
-    give_item="Optional item to grant when used",
-    give_item_amount="Quantity of the granted item"
-)
-async def eco_use_add(interaction: discord.Interaction, item: str, money: int = 0, xp: int = 0, message: str = "Used item!", role: discord.Role = None, temp_role: discord.Role = None, duration: int = 0, delay: int = 0, instant_message: str = None, give_item: str = None, give_item_amount: int = 1):
-    item = normalize_item(item)
-    if give_item:
-        give_item = normalize_item(give_item)
-
-    if role:
-        if interaction.user.top_role <= role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> You cannot configure an item to grant a role that is equal or higher than your highest role.",
-                ephemeral=True
-            )
-        if interaction.guild.me.top_role <= role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> I cannot assign that role because it is equal or higher than my highest role.",
-                ephemeral=True
-            )
-
-    if temp_role:
-        if interaction.user.top_role <= temp_role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> You cannot configure an item to grant a temporary role that is equal or higher than your highest role.",
-                ephemeral=True
-            )
-        if interaction.guild.me.top_role <= temp_role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> I cannot assign that temporary role because it is equal or higher than my highest role.",
-                ephemeral=True
-            )
-
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    guild["item_uses"][item] = {
-        "money": money,
-        "xp": xp,
-        "message": message,
-        "role_id": role.id if role else None,
-        "temp_role_id": temp_role.id if temp_role else None,
-        "duration": duration,
-        "delay": delay,
-        "instant_message": instant_message,
-        "give_item": give_item,
-        "give_item_amount": give_item_amount
-    }
-    save_data(data)
-    await interaction.response.send_message(
-        f"<:approve:1517452125687513158> Effect registered for **{item}**. (Gives: {give_item_amount}x {give_item if give_item else 'None'})"
-    )
 
 
 @bot.tree.command(name="eco-use", description="Use an item from your inventory")
@@ -4035,48 +4810,6 @@ async def eco_use(interaction: discord.Interaction, item: str, number_of_times: 
         await interaction.response.send_message(final_msg)
 
 
-@bot.tree.command(name="eco-use-del", description="Remove usage effect")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_use_del(interaction: discord.Interaction, item: str):
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    canonical = find_item_key(guild["item_uses"], item)
-    if canonical:
-        del guild["item_uses"][canonical]
-        save_data(data)
-        await interaction.response.send_message(f"<:trash:1517497581058527404> Removed usage effect for **{canonical}**.")
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> No usage effect found for **{item}**.", ephemeral=True)
-
-
-@bot.tree.command(name="eco-value-set", description="Set the selling price for an item")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_value_set(interaction: discord.Interaction, item: str, value: int):
-    item = normalize_item(item)
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    guild["item_values"][item] = value
-    save_data(data)
-    await interaction.response.send_message(f"<:approve:1517452125687513158> Users can now sell **{item}** for **${value}**.")
-
-
-@bot.tree.command(name="eco-value-del", description="Remove the selling price for an item")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def eco_value_del(interaction: discord.Interaction, item: str):
-    data = load_data()
-    guild = get_guild_data(data, str(interaction.guild.id))
-    canonical = find_item_key(guild["item_values"], item)
-    if canonical:
-        del guild["item_values"][canonical]
-        save_data(data)
-        await interaction.response.send_message(f"<:approve:1517452125687513158> Removed selling price for **{canonical}**. It can no longer be sold.")
-    else:
-        await interaction.response.send_message(f"<:disapprove:1517452151012589662> **{item}** doesn't have a price set.", ephemeral=True)
-
-
 @bot.tree.command(name="eco-sell", description="Sell a specific amount of an item from your inventory")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_sell(interaction: discord.Interaction, item: str, amount: int = 1):
@@ -4132,7 +4865,11 @@ async def info_recipes(interaction: discord.Interaction):
     for result_item, recipe in recipes.items():
         ing_list = ", ".join(f"{amt}x {name}" for name, amt in recipe["reqs"].items())
         delay_str = f"<:timer:1517996239583576194> {recipe.get('delay', 0)}s" if recipe.get("delay", 0) > 0 else ""
-        embed.add_field(name=result_item, value=f"Requires: {ing_list}{(' \n' + delay_str) if delay_str else ''}", inline=False)
+        embed.add_field(
+            name=result_item,
+            value=f"Requires: {ing_list}" + (f"\n{delay_str}" if delay_str else ""),
+            inline=False,
+        )
     await interaction.response.send_message(embed=embed)
 
 
@@ -4214,6 +4951,11 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
         user_data["level"] += 1
         leveled_up = True
         
+    first_time_level_up = False
+    if leveled_up and not get_user_has_leveled_up_before(user_id):
+        first_time_level_up = True
+        set_user_has_leveled_up_before(user_id, True)
+
     save_levels(levels)
     
     if leveled_up:
@@ -4261,12 +5003,13 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
             if reward.get("xp", 0) > 0:
                 await add_xp(member, guild, reward["xp"], announce_channel=announce_channel)
 
-        guild_config = levels[guild_id]["config"]
+        guild_config = get_guild_config(str(guild.id))[0]
         if guild_config.get("level_up_message_enabled", False) and announce_channel is not None:
             try:
-                await announce_channel.send(
-                    f"{format_user_reference(member)} just reached **Level {current_level}**!"
-                )
+                level_up_message = f"{format_user_reference(member)} just reached **Level {current_level}**!"
+                if first_time_level_up:
+                    level_up_message += "\n-# Use /settings and go to the user settings to disable pings."
+                await announce_channel.send(level_up_message)
             except discord.Forbidden as error:
                 add_bot_error_entry(guild.id, announce_channel.id, member, "level up message", error)
             except Exception:
@@ -4280,8 +5023,11 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
             if card_bytes:
                 file = discord.File(fp=card_bytes, filename="levelup.png")
                 try:
+                    level_banner_message = f"{format_user_reference(member)}, you just reached **Level {current_level}**!"
+                    if first_time_level_up:
+                        level_banner_message += "\n-# Use /settings and go to the user settings to disable pings."
                     await target_channel.send(
-                        content=f"{format_user_reference(member)}, you just reached **Level {current_level}**!",
+                        content=level_banner_message,
                         file=file
                     )
                 except discord.Forbidden as error:
@@ -4414,146 +5160,14 @@ async def lvl_edit(interaction: discord.Interaction, user: discord.Member, level
     await interaction.response.send_message(f"<:gear:1517576939097952496> Action complete. Set {format_user_reference(user)} to **Level {level}** with **{xp} XP**.", ephemeral=True)
 
 
-@bot.tree.command(name="lvl-channel-set", description="(Admin) Route level-up image logs into a designated text stream")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def lvl_channel_set(interaction: discord.Interaction, channel: discord.TextChannel):
+def save_level_reward_data(guild_id: str, level: int, reward_data: dict) -> None:
     levels = load_levels()
-    g_id = str(interaction.guild_id)
-    
-    if g_id not in levels: levels[g_id] = {"config": {}, "users": {}}
-    
-    levels[g_id]["config"]["channel_id"] = channel.id
+    if guild_id not in levels:
+        levels[guild_id] = {"config": {"channel_id": None, "rewards": {}}, "users": {}}
+    if "rewards" not in levels[guild_id]["config"]:
+        levels[guild_id]["config"]["rewards"] = {}
+    levels[guild_id]["config"]["rewards"][str(level)] = reward_data
     save_levels(levels)
-    await interaction.response.send_message(f"<:bell:1517497562184024275> Destination updated! Level-up notifications will now send to {channel.mention}.")
-
-
-@bot.tree.command(name="lvl-channel-remove", description="(Admin) Disable level-up notification image cards from sending")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def lvl_channel_remove(interaction: discord.Interaction):
-    levels = load_levels()
-    g_id = str(interaction.guild_id)
-    
-    if g_id not in levels or "config" not in levels[g_id] or levels[g_id]["config"].get("channel_id") is None:
-        return await interaction.response.send_message(
-            "<:disapprove:1517452151012589662> There is no level-up notification channel configured for this server currently.", 
-            ephemeral=True
-        )
-    
-    levels[g_id]["config"]["channel_id"] = None
-    save_levels(levels)
-    
-    await interaction.response.send_message(
-        "<:trash:1517497581058527404> Configuration removed! Level-up image banners are now disabled for this server.", 
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="toggle-lvl-up-message", description="(Admin) Enable or disable level-up chat messages")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.checks.has_permissions(manage_guild=True)
-async def toggle_lvl_up_message(interaction: discord.Interaction):
-    levels = load_levels()
-    g_id = str(interaction.guild_id)
-
-    if g_id not in levels:
-        levels[g_id] = {"config": {"channel_id": None, "rewards": {}, "level_up_message_enabled": False}, "users": {}}
-    elif "config" not in levels[g_id]:
-        levels[g_id]["config"] = {"channel_id": None, "rewards": {}, "level_up_message_enabled": False}
-
-    current_state = levels[g_id]["config"].get("level_up_message_enabled", False)
-    new_state = not current_state
-    levels[g_id]["config"]["level_up_message_enabled"] = new_state
-    save_levels(levels)
-
-    status_text = "enabled" if new_state else "disabled"
-    await interaction.response.send_message(
-        f"📢 Level-up chat messages are now **{status_text}** for this server.",
-        ephemeral=True
-    )
-
-
-@bot.tree.command(name="lvl-rewards-set", description="(Admin) Map an automatic reward milestone to a level")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(
-    level="The target level milestone",
-    role="Optional role to grant at this level",
-    temp_role="Optional temporary role to grant at this level",
-    duration="Duration for the temporary role in seconds",
-    money="Optional money reward granted at this level",
-    xp="Optional XP reward granted at this level",
-    item="Optional item to give at this level",
-    item_amount="Quantity of the item to give"
-)
-async def lvl_rewards_set(interaction: discord.Interaction, level: int, role: discord.Role = None, temp_role: discord.Role = None, duration: int = 0, money: int = 0, xp: int = 0, item: str = None, item_amount: int = 1):
-    if not role and not temp_role and money <= 0 and xp <= 0 and not item:
-        return await interaction.response.send_message(
-            "<:disapprove:1517452151012589662> You must specify at least one reward: role, temp_role, money, xp, or item.",
-            ephemeral=True
-        )
-
-    if role:
-        if interaction.user.top_role <= role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> You cannot configure a level reward role that is equal or higher than your highest role.",
-                ephemeral=True
-            )
-        if interaction.guild.me.top_role <= role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> I cannot assign that role because it is equal or higher than my highest role.",
-                ephemeral=True
-            )
-
-    if temp_role:
-        if interaction.user.top_role <= temp_role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> You cannot configure a temporary role reward that is equal or higher than your highest role.",
-                ephemeral=True
-            )
-        if interaction.guild.me.top_role <= temp_role:
-            return await interaction.response.send_message(
-                "<:disapprove:1517452151012589662> I cannot assign that temporary role because it is equal or higher than my highest role.",
-                ephemeral=True
-            )
-
-    reward_data = {
-        "role_id": role.id if role else None,
-        "temp_role_id": temp_role.id if temp_role else None,
-        "duration": duration,
-        "money": money,
-        "xp": xp,
-        "give_item": normalize_item(item) if item else None,
-        "give_item_amount": item_amount
-    }
-
-    levels = load_levels()
-    g_id = str(interaction.guild_id)
-
-    if g_id not in levels:
-        levels[g_id] = {"config": {"channel_id": None, "rewards": {}}, "users": {}}
-    if "rewards" not in levels[g_id]["config"]:
-        levels[g_id]["config"]["rewards"] = {}
-        
-    levels[g_id]["config"]["rewards"][str(level)] = reward_data
-    save_levels(levels)
-
-    reward_parts = []
-    if role:
-        reward_parts.append(f"role {role.mention}")
-    if temp_role:
-        reward_parts.append(f"temp role {temp_role.mention} for {duration}s")
-    if money > 0:
-        reward_parts.append(f"${money}")
-    if xp > 0:
-        reward_parts.append(f"{xp} XP")
-    if item:
-        reward_parts.append(f"{item_amount}x {normalize_item(item)}")
-
-    await interaction.response.send_message(
-        f"<:box:1517581439552585759> Level {level} reward configured: {', '.join(reward_parts)}.", ephemeral=True
-    )
 
 
 def format_level_reward_summary(guild: discord.Guild, level: str, reward_data: dict) -> str:
@@ -4650,28 +5264,125 @@ async def lvl_rewards_del(interaction: discord.Interaction, level: int):
 # -------------------------------------------------------------------------------------------------------------
 
 
+def update_env_setting(key: str, value: str) -> None:
+    env_path = os.path.join(BASE_DIR, ".env")
+    lines = []
+    found = False
+
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    lines.append(line)
+                    continue
+                if stripped.startswith(f"{key}="):
+                    if any(ch.isspace() for ch in value) or any(ch in value for ch in "#=!"):
+                        escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+                        lines.append(f'{key}="{escaped_value}"\n')
+                    else:
+                        lines.append(f"{key}={value}\n")
+                    found = True
+                else:
+                    lines.append(line)
+
+    if not found:
+        if any(ch.isspace() for ch in value) or any(ch in value for ch in "#=!"):
+            escaped_value = value.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(f'{key}="{escaped_value}"\n')
+        else:
+            lines.append(f"{key}={value}\n")
+
+    with open(env_path, "w", encoding="utf-8") as handle:
+        handle.write("".join(lines))
+
+    os.environ[key] = value
 
 
-@bot.tree.command(name="own-shutdown", description="(owner) Stop the bot for an update or just to restart")
-@app_commands.describe(
-    channel="Optional announcement channel to send the shutdown message to",
-    reason="The shutdown reason to publish"
-)
-async def own_shutdown(
-    interaction: discord.Interaction,
-    channel: discord.TextChannel = None,
-    reason: str = "No reason provided"
-):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Do not even try...", ephemeral=True)
+@bot.command(name="ver")
+async def set_bot_version(ctx: commands.Context, *, new_value: str = ""):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
 
-    target_channel = channel or bot.get_channel(1514173159052415026)
-    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
-        target_channel = interaction.channel
+    global VERSION
 
-    shutdown_text = (
-        f"🔌 {reason}"
-    )
+    if not new_value.strip():
+        return await ctx.send(f"Current version: `{VERSION or ''}`")
+
+    cleaned_value = new_value.strip()
+    update_env_setting("BOT_VERSION", cleaned_value)
+    VERSION = cleaned_value
+
+    if update_presence.is_running():
+        update_presence.restart()
+
+    await ctx.send(f"Updated BOT_VERSION in .env to `{VERSION}`.")
+
+
+@bot.command(name="alt")
+async def set_bot_alt_version(ctx: commands.Context, *, new_value: str = ""):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+
+    global VERSION_ALTERNATE
+
+    if not new_value.strip():
+        return await ctx.send(f"Current alternate version: `{VERSION_ALTERNATE or ''}`")
+
+    cleaned_value = new_value.strip()
+    update_env_setting("BOT_VERSION_ALTERNATE", cleaned_value)
+    VERSION_ALTERNATE = cleaned_value
+
+    if update_presence.is_running():
+        update_presence.restart()
+
+    await ctx.send(f"Updated BOT_VERSION_ALTERNATE in .env to `{VERSION_ALTERNATE}`.")
+
+
+@bot.command(name="activity")
+async def set_bot_activity(ctx: commands.Context, *, new_value: str = ""):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+
+    global ACTIVITY_TEXT
+
+    if not new_value.strip():
+        return await ctx.send(f"Current activity: `{ACTIVITY_TEXT or ''}`")
+
+    cleaned_value = new_value.strip()
+    update_env_setting("ACTIVITY", cleaned_value)
+    ACTIVITY_TEXT = cleaned_value
+
+    if update_presence.is_running():
+        update_presence.restart()
+
+    await ctx.send(f"Updated ACTIVITY in .env to `{ACTIVITY_TEXT}`.")
+
+
+@bot.command(name="shutdown")
+async def own_shutdown(ctx: commands.Context, *, args: str = ""):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+
+    channel = None
+    reason = "No reason provided"
+
+    if args:
+        parts = args.split(maxsplit=1)
+        if parts and parts[0].startswith("#"):
+            channel_name = parts[0].lstrip("#")
+            channel = discord.utils.get(ctx.guild.text_channels, name=channel_name) if ctx.guild else None
+            if len(parts) > 1:
+                reason = parts[1]
+        else:
+            reason = args
+
+    if channel is None:
+        channel = bot.get_channel(1514173159052415026)
+    if channel is None and isinstance(ctx.channel, discord.TextChannel):
+        channel = ctx.channel
+
+    shutdown_text = f"🔌 {reason}"
     shutdown_embed = discord.Embed(
         title="Bot Shutdown Initiated",
         description=shutdown_text,
@@ -4679,27 +5390,21 @@ async def own_shutdown(
     )
 
     published = False
-    if target_channel is not None:
+    if channel is not None:
         try:
-            sent_msg = await target_channel.send(embed=shutdown_embed)
-            if target_channel.type == discord.ChannelType.news:
+            sent_msg = await channel.send(embed=shutdown_embed)
+            if channel.type == discord.ChannelType.news:
                 try:
                     await sent_msg.publish()
                     published = True
                 except Exception:
                     published = False
         except discord.Forbidden as error:
-            add_bot_error_entry(interaction.guild.id if interaction.guild else None, target_channel.id, interaction.user, "shutdown notice", error)
-            await interaction.response.send_message(
-                f"<:disapprove:1517452151012589662> Could not send the shutdown notice to {target_channel.mention}.",
-                ephemeral=True
-            )
+            add_bot_error_entry(ctx.guild.id if ctx.guild else None, channel.id, ctx.author, "shutdown notice", error)
+            await ctx.send(f"<:disapprove:1517452151012589662> Could not send the shutdown notice to {channel.mention}.")
             return
         except Exception as e:
-            await interaction.response.send_message(
-                f"<:disapprove:1517452151012589662> Could not send the shutdown notice to {target_channel.mention}. Error: {e}",
-                ephemeral=True
-            )
+            await ctx.send(f"<:disapprove:1517452151012589662> Could not send the shutdown notice to {channel.mention}. Error: {e}")
             return
 
     if update_presence.is_running():
@@ -4707,13 +5412,13 @@ async def own_shutdown(
         await asyncio.sleep(1)
 
     response_text = "Going to sleep..."
-    if target_channel is not None:
+    if channel is not None:
         response_text = (
-            f"Shutdown notice sent to {target_channel.mention}. "
+            f"Shutdown notice sent to {channel.mention}. "
             + ("Published to followers." if published else "")
         )
 
-    await interaction.response.send_message(response_text)
+    await ctx.send(response_text)
 
     shutdown_activity = discord.Activity(type=discord.ActivityType.watching, name="App is shutting down!!! !! !")
     sleep_activity = discord.Activity(type=discord.ActivityType.watching, name="App is sleeping... zZzZzZ")
@@ -4726,263 +5431,6 @@ async def own_shutdown(
     await bot.close()
 
 
-@bot.tree.command(name="own-stop-urgent", description="(owner) STOPS IMMEDIATLY IF SOMETHING WENT REALLY WRONG")
-@app_commands.describe(channel="Optional announcement channel to send the force shutdown message to")
-async def own_stop_urgent(interaction: discord.Interaction, channel: discord.TextChannel = None):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Stop.", ephemeral=True)
-
-    target_channel = channel or bot.get_channel(1514173159052415026)
-    if target_channel is None and isinstance(interaction.channel, discord.TextChannel):
-        target_channel = interaction.channel
-
-    force_text = "<:warning:1517452174991556758> The bot is going offline immediately due to an urgent issue."
-    force_embed = discord.Embed(
-        title="Force Shutdown",
-        description=force_text,
-        color=discord.Color.red()
-    )
-
-    if target_channel is not None:
-        try:
-            sent_msg = await target_channel.send(embed=force_embed)
-            if target_channel.type == discord.ChannelType.news:
-                try:
-                    await sent_msg.publish()
-                except Exception:
-                    pass
-        except discord.Forbidden as error:
-            add_bot_error_entry(interaction.guild.id if interaction.guild else None, target_channel.id, interaction.user, "urgent shutdown notice", error)
-        except Exception:
-            pass
-
-    if update_presence.is_running():
-        update_presence.cancel()
-    await interaction.response.send_message("Goodbye.")
-    forced_activity = discord.Activity(type=discord.ActivityType.watching, name="App was shutdown forcefully...")
-    for shard_id in bot.shards:
-        await bot.change_presence(activity=forced_activity, status=discord.Status.dnd, shard_id=shard_id)
-    close_local_rpc()
-    await bot.close()
-
-
-@bot.tree.command(name="own-game-work", description="(owner) Spawn a specific work game for debugging")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.describe(
-    game="Choose which work game to spawn",
-    difficulty="Choose the difficulty"
-)
-@app_commands.choices(
-    game=[
-        app_commands.Choice(name="Developer", value="developer"),
-        app_commands.Choice(name="Farmer", value="farmer"),
-        app_commands.Choice(name="Math Teacher", value="math"),
-    ],
-    difficulty=[
-        app_commands.Choice(name="Easy", value="easy"),
-        app_commands.Choice(name="Normal", value="normal"),
-        app_commands.Choice(name="Hard", value="hard"),
-    ]
-)
-async def own_game_work(interaction: discord.Interaction, game: str, difficulty: str = "normal"):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Owner only.", ephemeral=True)
-
-    difficulty = difficulty.lower().strip()
-    if difficulty not in WORK_DIFFICULTY_SETTINGS:
-        difficulty = "normal"
-
-    job_type = game.lower().strip()
-    if job_type not in {"developer", "farmer", "math"}:
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid work game selected.", ephemeral=True)
-
-    view = WorkGameView(job_type, str(interaction.guild.id), interaction.user.id, 0, difficulty)
-    await interaction.response.send_message(embed=view.embed, view=view)
-    view.message = await interaction.original_response()
-
-
-@bot.tree.command(name="own-shard-info", description="(owner) Display shard status and guild distribution")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def shard_info(interaction: discord.Interaction):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Owner only.", ephemeral=True)
-
-    total_shards = len(bot.shards) or 1
-    embed = discord.Embed(title="Shard Information", color=discord.Color.blurple())
-    embed.add_field(name="Total Shards", value=str(total_shards), inline=True)
-    embed.add_field(name="Total Guilds", value=str(len(bot.guilds)), inline=True)
-    embed.add_field(name="Total Users", value=str(len(bot.users)), inline=True)
-
-    for shard_id, shard in bot.shards.items():
-        guilds_on_shard = [g for g in bot.guilds if g.shard_id == shard_id]
-        latency_ms = round(shard.latency * 1000, 1)
-        embed.add_field(
-            name=f"Shard {shard_id}",
-            value=f"{latency_ms}ms | {len(guilds_on_shard)} guild(s)",
-            inline=False,
-        )
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-@bot.tree.command(name="own-shard-map", description="(owner) Show which guilds are assigned to each shard")
-async def shard_map(interaction: discord.Interaction):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> You are not authorized to use this command.", ephemeral=True)
-
-    shard_map = {}
-    for guild in bot.guilds:
-        shard_id = getattr(guild, 'shard_id', 0)
-        shard_map.setdefault(shard_id, []).append(f"> **{guild.name}** ||({guild.id})||")
-
-    embed = discord.Embed(
-        title="Shard Assignment Map",
-        description="Shows which servers are served by each shard.",
-        color=discord.Color.blurple()
-    )
-    for shard_id in sorted(shard_map.keys()):
-        guild_list = shard_map[shard_id]
-        value = "\n".join(guild_list)
-        embed.add_field(name=f"Shard {shard_id}", value=value, inline=False)
-
-    await interaction.response.send_message(embed=embed, ephemeral=True)
-
-
-def build_bot_emoji_pages(emojis):
-    pages = []
-    current_lines = []
-
-    def flush_page():
-        if current_lines:
-            pages.append("\n".join(current_lines))
-
-    current_length = 0
-    for emoji in emojis:
-        emoji_line = f"{str(emoji)} `<:{emoji.name}:{emoji.id}>`{' animated' if emoji.animated else ''}"
-
-        addition = len(emoji_line) + 1
-        if current_lines and current_length + addition > 3200:
-            flush_page()
-            current_lines.clear()
-            current_length = 0
-
-        current_lines.append(emoji_line)
-        current_length += addition
-
-    flush_page()
-    return pages or ["No custom emojis available."]
-
-
-class BotEmojiPaginator(discord.ui.View):
-    def __init__(self, pages):
-        super().__init__(timeout=120)
-        self.pages = pages
-        self.index = 0
-        self.message = None
-        self.update_buttons()
-
-    def update_buttons(self):
-        self.prev_button.disabled = self.index <= 0
-        self.next_button.disabled = self.index >= len(self.pages) - 1
-
-    def build_embed(self):
-        embed = discord.Embed(
-            title="Bot Emojis",
-            description=self.pages[self.index],
-            color=discord.Color.blurple()
-        )
-        embed.set_footer(text=f"Page {self.index + 1}/{len(self.pages)}")
-        return embed
-
-    async def show_page(self, interaction: discord.Interaction):
-        self.update_buttons()
-        await interaction.response.edit_message(embed=self.build_embed(), view=self)
-
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
-    async def prev_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.index > 0:
-            self.index -= 1
-        await self.show_page(interaction)
-
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.primary)
-    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if self.index < len(self.pages) - 1:
-            self.index += 1
-        await self.show_page(interaction)
-
-    async def on_timeout(self):
-        for item in self.children:
-            item.disabled = True
-        if self.message:
-            try:
-                await self.message.edit(view=self)
-            except Exception:
-                pass
-
-
-@bot.tree.command(name="own-bot-emojis", description="(owner) Display all custom emojis the bot can use")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def own_bot_emojis(interaction: discord.Interaction):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Owner only.", ephemeral=True)
-
-    try:
-        emojis = await bot.fetch_application_emojis()
-    except discord.MissingApplicationID:
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> The bot does not have an application ID yet.", ephemeral=True)
-    except Exception as e:
-        return await interaction.response.send_message(f"<:disapprove:1517452151012589662> Could not fetch application emojis: {e}", ephemeral=True)
-
-    emojis = sorted(emojis, key=lambda emoji: emoji.name.lower())
-    if not emojis:
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> The application does not have any custom emojis.", ephemeral=True)
-
-    pages = build_bot_emoji_pages(emojis)
-    view = BotEmojiPaginator(pages)
-    await interaction.response.send_message(embed=view.build_embed(), view=view)
-    view.message = await interaction.original_response()
-
-
-@bot.tree.command(name="own-test-goodbye", description="Preview the goodbye banner for a specific user")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def test_goodbye(interaction: discord.Interaction, member: discord.Member = None):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Owner only.", ephemeral=True)
-
-    target_member = member or interaction.user
-    await interaction.response.defer()
-    try:
-        goodbye_file = await create_goodbye_card(target_member)
-        if goodbye_file:
-            await interaction.followup.send(f"<:image:1517497571470348539> **Goodbye Banner Preview** for {format_user_reference(target_member)}:", file=goodbye_file)
-        else:
-            await interaction.followup.send("<:disapprove:1517452151012589662> Failed to generate the image. Check the console for errors.")
-    except Exception as e:
-        print(f"Error in test-goodbye: {e}")
-        await interaction.followup.send(f"<:warning:1517452174991556758> An error occurred: {e}")
-
-
-@bot.tree.command(name="own-test-welcome", description="Preview the welcome banner for a specific user")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def test_welcome(interaction: discord.Interaction, member: discord.Member = None):
-    if not await bot.is_owner(interaction.user):
-        return await interaction.response.send_message("<:disapprove:1517452151012589662> Owner only.", ephemeral=True)
-
-    target_member = member or interaction.user
-    await interaction.response.defer()
-    try:
-        welcome_file = await create_welcome_card(target_member)
-        if welcome_file:
-            await interaction.followup.send(f"<:image:1517497571470348539> **Welcome Banner Preview** for {format_user_reference(target_member)}:", file=welcome_file)
-        else:
-            await interaction.followup.send("<:disapprove:1517452151012589662> Failed to generate the image. Check the console for errors.")
-    except Exception as e:
-        print(f"Error in test-welcome: {e}")
-        await interaction.followup.send(f"<:warning:1517452174991556758> An error occurred: {e}")
-
-
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -4992,36 +5440,2021 @@ async def test_welcome(interaction: discord.Interaction, member: discord.Member 
 
 
 
-@bot.tree.command(name="set-color", description="Choose the block color for your /level tracking progress bar")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.choices(color=[app_commands.Choice(name=name.title(), value=name) for name in COLOR_EMOJIS.keys() if name != "black"])
-async def set_profile_color(interaction: discord.Interaction, color: str):
+USER_COLOR_OPTIONS = [name for name in COLOR_EMOJIS.keys() if name != "black"]
+
+
+def get_user_color_value(user_id: str) -> discord.Color:
     settings = load_user_settings()
-    user_settings = get_user_settings_entry(settings, str(interaction.user.id))
-    user_settings["color"] = color
-    save_user_settings(settings)
+    user_settings = get_user_settings_entry(settings, user_id)
+    color_name = user_settings.get("color", "white")
+    color_map = {
+        "white": discord.Color.light_gray(),
+        "black": discord.Color.dark_gray(),
+        "red": discord.Color.red(),
+        "blue": discord.Color.blue(),
+        "green": discord.Color.green(),
+        "yellow": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+        "brown": discord.Color.dark_orange(),
+    }
+    return color_map.get(color_name, discord.Color.blurple())
 
-    await interaction.response.send_message(
-        f"<:image:1517497571470348539> Clean style! Your profile tracking bar is now set to {COLOR_EMOJIS[color]} **{color}** across all servers.",
-        ephemeral=True
+
+class SettingsMenuView(LayoutView):
+    def __init__(self, user_id: int, username: str, color: discord.Color):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.username = username
+        self.color = color
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.user_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="settings_open_user",
+        )
+        self.guild_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="settings_open_guild",
+        )
+        self.channel_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="settings_open_channel",
+        )
+        self.economy_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="settings_open_economy",
+        )
+        self.level_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="settings_open_level",
+        )
+
+        async def open_user(interaction: discord.Interaction):
+            settings = load_user_settings()
+            user_settings = get_user_settings_entry(settings, str(interaction.user.id))
+            new_view = UserSettingsView(
+                interaction.user.id,
+                current_color=user_settings.get("color", "white"),
+                current_pings=user_settings.get("user_pings", True),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_guild(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use guild settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_id = str(interaction.guild.id)
+            guild_config, _ = get_guild_config(guild_id)
+            new_view = GuildSettingsView(
+                interaction.user.id,
+                guild_id,
+                ghost_pings=guild_config.get("ghost_ping_enabled", False),
+                history_enabled=guild_config.get("edit_delete_history_enabled", True),
+                level_up_enabled=guild_config.get("level_up_message_enabled", False),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_channel_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use channel settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_channels:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Channels permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_id = str(interaction.guild.id)
+            new_view = ChannelSettingsView(
+                interaction.user.id,
+                guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_economy_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use economy settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_id = str(interaction.guild.id)
+            new_view = EconomySettingsView(
+                interaction.user.id,
+                guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_level_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use level settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_id = str(interaction.guild.id)
+            new_view = LevelSettingsView(
+                interaction.user.id,
+                guild_id,
+                get_user_color_value(str(interaction.user.id)),
+                settings_message=interaction.message,
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        self.user_button.callback = open_user
+        self.guild_button.callback = open_guild
+        self.channel_button.callback = open_channel_settings
+        self.economy_button.callback = open_economy_settings
+        self.level_button.callback = open_level_settings
+
+        container = Container(
+            TextDisplay(f"<:gear:1517576939097952496> **Settings for {self.username}**"),
+            Separator(),
+            Section("<:edit:1517497568421085256> User settings", accessory=self.user_button),
+            Section("<:drawer:1517497564189036574> Guild settings", accessory=self.guild_button),
+            Section("<:list:1517497572770451567> Channel settings", accessory=self.channel_button),
+            Section("<:money:1517580310395486239> Economy settings", accessory=self.economy_button),
+            Section("<:chalice:1517579767573123092> Level settings", accessory=self.level_button),
+            Separator(),
+            TextDisplay("Found a bug ? Report it in the [support server](https://discord.gg/FSBPvc9zqY)"),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+
+
+class UserSettingsView(LayoutView):
+    def __init__(self, user_id: int, current_color: str, current_pings: bool):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.current_color = current_color or "white"
+        self.current_pings = current_pings
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.ping_button = discord.ui.Button(
+            label="Toggle",
+            style=discord.ButtonStyle.secondary,
+            custom_id="user_settings_pings",
+        )
+
+        async def ping_callback(interaction: discord.Interaction):
+            settings = load_user_settings()
+            user_settings = get_user_settings_entry(settings, str(interaction.user.id))
+            self.current_pings = not self.current_pings
+            user_settings["user_pings"] = self.current_pings
+            save_user_settings(settings)
+            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings))
+
+        self.ping_button.callback = ping_callback
+
+        self.color_select = discord.ui.Select(
+            placeholder="Select a profile color",
+            options=[
+                discord.SelectOption(label=color.title(), value=color, description=f"Use the {color} color")
+                for color in USER_COLOR_OPTIONS
+            ],
+            custom_id="user_color_select",
+            min_values=1,
+            max_values=1,
+        )
+
+        async def color_select_callback(interaction: discord.Interaction):
+            settings = load_user_settings()
+            user_settings = get_user_settings_entry(settings, str(interaction.user.id))
+            self.current_color = self.color_select.values[0]
+            user_settings["color"] = self.current_color
+            save_user_settings(settings)
+            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings))
+
+        self.color_select.callback = color_select_callback
+
+        self.back_button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="user_settings_back")
+
+        async def back_callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+        self.back_button.callback = back_callback
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **User settings**"),
+            TextDisplay("Adjust your personal preferences below."),
+            Separator(),
+            Section(f"<:bell:1517497562184024275> Ping notifications: {'Enabled' if self.current_pings else 'Disabled'}", accessory=self.ping_button),
+            TextDisplay(f"<:rainbow:1518708398772846722> User color: {COLOR_EMOJIS.get(self.current_color, self.current_color)} {self.current_color.title()}"),
+            accent_color=get_user_color_value(str(self.user_id)),
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.color_select))
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class GuildSettingsView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str, ghost_pings: bool, history_enabled: bool, level_up_enabled: bool):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.ghost_pings = ghost_pings
+        self.history_enabled = history_enabled
+        self.level_up_enabled = level_up_enabled
+        self.color = get_user_color_value(str(user_id))
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.ghost_button = discord.ui.Button(
+            label="Toggle",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_ghost_pings",
+        )
+        self.history_button = discord.ui.Button(
+            label="Toggle",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_history",
+        )
+        self.level_button = discord.ui.Button(
+            label="Toggle",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_level_up",
+        )
+        self.auto_reply_button = discord.ui.Button(
+            label="Edit",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_auto_reply",
+        )
+
+        fun_data = load_fun_data()
+        auto_reply_triggers = sorted(fun_data.get(self.guild_id, {}).keys()) if self.guild_id in fun_data else []
+        auto_reply_text = "\n".join(auto_reply_triggers) if auto_reply_triggers else "None"
+
+        async def ghost_callback(interaction: discord.Interaction):
+            guild_config, data = get_guild_config(self.guild_id)
+            self.ghost_pings = not self.ghost_pings
+            guild_config["ghost_ping_enabled"] = self.ghost_pings
+            save_guild_data(data)
+            await interaction.response.edit_message(view=GuildSettingsView(self.user_id, self.guild_id, self.ghost_pings, self.history_enabled, self.level_up_enabled))
+
+        async def history_callback(interaction: discord.Interaction):
+            guild_config, data = get_guild_config(self.guild_id)
+            self.history_enabled = not self.history_enabled
+            guild_config["edit_delete_history_enabled"] = self.history_enabled
+            save_guild_data(data)
+            await interaction.response.edit_message(view=GuildSettingsView(self.user_id, self.guild_id, self.ghost_pings, self.history_enabled, self.level_up_enabled))
+
+        async def level_callback(interaction: discord.Interaction):
+            guild_config, guild_data = get_guild_config(self.guild_id)
+            levels = load_levels()
+            if self.guild_id not in levels:
+                levels[self.guild_id] = {"config": {}}
+            config = levels[self.guild_id].get("config", {})
+
+            self.level_up_enabled = not self.level_up_enabled
+            guild_config["level_up_message_enabled"] = self.level_up_enabled
+            save_guild_data(guild_data)
+
+            config["level_up_message_enabled"] = self.level_up_enabled
+            levels[self.guild_id]["config"] = config
+            save_levels(levels)
+            await interaction.response.edit_message(view=GuildSettingsView(self.user_id, self.guild_id, self.ghost_pings, self.history_enabled, self.level_up_enabled))
+
+        self.ghost_button.callback = ghost_callback
+        self.history_button.callback = history_callback
+        self.level_button.callback = level_callback
+        self.auto_reply_button.callback = self.handle_auto_reply_edit
+
+        self.back_button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="guild_settings_back")
+
+        async def back_callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+        self.back_button.callback = back_callback
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Guild settings**"),
+            TextDisplay("Adjust guild-wide behavior below."),
+            Separator(),
+            Section(f"<:ghost:1517497569939558470> Ghost pings: {'Enabled' if self.ghost_pings else 'Disabled'}", accessory=self.ghost_button),
+            Section(f"<:trash:1517497581058527404> Edit/Delete history: {'Enabled' if self.history_enabled else 'Disabled'}", accessory=self.history_button),
+            Section(f"<:chalice:1517579767573123092> Level-up messages: {'Enabled' if self.level_up_enabled else 'Disabled'}", accessory=self.level_button),
+            Section(f"<:spark:1517583248421552305> Auto-reply triggers\n{auto_reply_text}", accessory=self.auto_reply_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def refresh_settings_message(self, interaction: discord.Interaction, view: discord.ui.View, settings_message: discord.Message | None = None):
+        if settings_message is None:
+            settings_message = interaction.message
+            if settings_message is None:
+                try:
+                    settings_message = await interaction.original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    settings_message = None
+        if settings_message is None:
+            return
+        try:
+            await settings_message.edit(view=view)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+        try:
+            channel = bot.get_channel(settings_message.channel.id)
+            if channel is not None:
+                settings_message = await channel.fetch_message(settings_message.id)
+                await settings_message.edit(view=view)
+                return
+        except Exception:
+            pass
+
+        try:
+            await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+            return
+        except Exception:
+            pass
+
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:
+            pass
+
+    async def get_settings_message(self, channel_id: int, message_id: int) -> discord.Message | None:
+        channel = bot.get_channel(channel_id)
+        if channel is None:
+            return None
+
+        try:
+            return await channel.fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+
+    async def handle_auto_reply_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message or await interaction.original_response()
+        if settings_message is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Unable to determine the settings message.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            "What would you like to do with Auto-reply triggers?",
+            view=AutoReplyChoiceView(
+                self.user_id,
+                self.open_auto_reply_add,
+                self.open_auto_reply_remove,
+                settings_message,
+            ),
+            ephemeral=True,
+        )
+
+    async def open_auto_reply_add(self, interaction: discord.Interaction, settings_message: discord.Message | None):
+        await interaction.response.send_modal(AutoReplyAddModal(self.add_auto_reply, self.guild_id, settings_message))
+
+    async def open_auto_reply_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None):
+        await interaction.response.send_modal(AutoReplyRemoveModal(self.remove_auto_reply, self.guild_id, settings_message))
+
+    async def add_auto_reply(self, interaction: discord.Interaction, word: str, replies: list[str], settings_message: discord.Message | None):
+        fun_data = load_fun_data()
+        if self.guild_id not in fun_data:
+            fun_data[self.guild_id] = {}
+        fun_data[self.guild_id][word.lower()] = replies
+        save_fun_data(fun_data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Auto reply for '{word}' saved.", ephemeral=True)
+
+        await self.refresh_settings_message(
+            interaction,
+            GuildSettingsView(self.user_id, self.guild_id, self.ghost_pings, self.history_enabled, self.level_up_enabled),
+            settings_message,
+        )
+
+    async def remove_auto_reply(self, interaction: discord.Interaction, word: str, settings_message: discord.Message | None):
+        fun_data = load_fun_data()
+        if self.guild_id in fun_data and word.lower() in fun_data[self.guild_id]:
+            del fun_data[self.guild_id][word.lower()]
+            if not fun_data[self.guild_id]:
+                del fun_data[self.guild_id]
+            save_fun_data(fun_data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Auto reply for '{word}' removed.", ephemeral=True)
+
+            await self.refresh_settings_message(
+                interaction,
+                GuildSettingsView(self.user_id, self.guild_id, self.ghost_pings, self.history_enabled, self.level_up_enabled),
+                settings_message,
+            )
+        else:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> No auto reply found for '{word}'.", ephemeral=True)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class ConfirmRemoveView(discord.ui.View):
+    def __init__(self, user_id: int, confirm_callback, original_message: discord.Message):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.confirm_callback = confirm_callback
+        self.original_message = original_message
+        self.confirm_button = Button(label="Confirm", style=discord.ButtonStyle.danger, custom_id="confirm_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel_remove")
+        self.confirm_button.callback = self.on_confirm
+        self.cancel_button.callback = self.on_cancel
+        self.add_item(self.confirm_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This confirmation is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_confirm(self, interaction: discord.Interaction):
+        self.confirm_button.disabled = True
+        self.cancel_button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await self.confirm_callback(interaction, self.original_message)
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        self.confirm_button.disabled = True
+        self.cancel_button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+
+class ChannelSelectorView(discord.ui.View):
+    def __init__(self, user_id: int, guild: discord.Guild, placeholder: str, callback, settings_message: discord.Message):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild = guild
+        self.callback = callback
+        self.settings_message = settings_message
+        self.channel_select = ChannelSelect(placeholder=placeholder, custom_id="channel_selector", min_values=1, max_values=1)
+        self.channel_select.callback = self.on_channel_selected
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="channel_select_cancel")
+        self.cancel_button.callback = self.on_cancel
+        self.add_item(self.channel_select)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_channel_selected(self, interaction: discord.Interaction):
+        if not self.channel_select.values:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> No channel was selected.", ephemeral=True)
+            return
+
+        channel = self.channel_select.values[0]
+        self.channel_select.disabled = True
+        self.cancel_button.disabled = True
+        await self.callback(interaction, channel, self.settings_message)
+        try:
+            await interaction.message.edit(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+    async def on_cancel(self, interaction: discord.Interaction):
+        self.channel_select.disabled = True
+        self.cancel_button.disabled = True
+        try:
+            await interaction.response.edit_message(content="Channel selection cancelled.", view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+
+class YesNoView(discord.ui.View):
+    def __init__(self, user_id: int, yes_callback, no_callback):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.yes_callback = yes_callback
+        self.no_callback = no_callback
+        self.yes_button = Button(label="Yes", style=discord.ButtonStyle.success, custom_id="yes_option")
+        self.no_button = Button(label="No", style=discord.ButtonStyle.danger, custom_id="no_option")
+        self.yes_button.callback = self.on_yes
+        self.no_button.callback = self.on_no
+        self.add_item(self.yes_button)
+        self.add_item(self.no_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_yes(self, interaction: discord.Interaction):
+        self.yes_button.disabled = True
+        self.no_button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await self.yes_callback(interaction)
+
+    async def on_no(self, interaction: discord.Interaction):
+        self.yes_button.disabled = True
+        self.no_button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        await self.no_callback(interaction)
+
+
+class BoardCountPromptView(discord.ui.View):
+    def __init__(self, user_id: int, channel: discord.abc.GuildChannel, emoji: str, settings_message: discord.Message, callback):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.channel = channel
+        self.emoji = emoji
+        self.settings_message = settings_message
+        self.callback = callback
+        self.count_button = Button(label="Set required count", style=discord.ButtonStyle.primary, custom_id="board_set_count")
+        self.count_button.callback = self.on_set_count
+        self.add_item(self.count_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_set_count(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(BoardCountModal(self.callback, self.channel, self.emoji, self.settings_message))
+
+
+class BoardCountModal(Modal):
+    def __init__(self, callback, channel: discord.abc.GuildChannel, emoji: str, settings_message: discord.Message):
+        super().__init__(title="Board required count")
+        self.callback = callback
+        self.channel = channel
+        self.emoji = emoji
+        self.settings_message = settings_message
+        self.count_input = TextInput(label="Required count", placeholder="How many reactions are required?", required=True, max_length=10)
+        self.add_item(self.count_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            required_count = int(self.count_input.value)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Required count must be a number.", ephemeral=True)
+            return
+        await self.callback(interaction, self.channel, self.emoji, required_count, self.settings_message)
+
+
+class AutoReplyAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add auto reply")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.word_input = TextInput(label="Trigger word", placeholder="Enter the trigger word", required=True, max_length=100)
+        self.reply1 = TextInput(label="Reply 1", placeholder="First reply", required=True, max_length=200)
+        self.reply2 = TextInput(label="Reply 2", placeholder="Second reply (optional)", required=False, max_length=200)
+        self.reply3 = TextInput(label="Reply 3", placeholder="Third reply (optional)", required=False, max_length=200)
+        self.reply4 = TextInput(label="Reply 4", placeholder="Fourth reply (optional)", required=False, max_length=200)
+        self.add_item(self.word_input)
+        self.add_item(self.reply1)
+        self.add_item(self.reply2)
+        self.add_item(self.reply3)
+        self.add_item(self.reply4)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        replies = [value for value in [self.reply1.value, self.reply2.value, self.reply3.value, self.reply4.value] if value]
+        await self.callback(
+            interaction,
+            self.word_input.value.strip(),
+            replies,
+            self.settings_message,
+        )
+
+
+class AutoReplyRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove auto reply")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.word_input = TextInput(label="Trigger word to remove", placeholder="Enter the exact trigger word", required=True, max_length=100)
+        self.add_item(self.word_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(
+            interaction,
+            self.word_input.value.strip(),
+            self.settings_message,
+        )
+
+
+class AutoReplyChoiceView(discord.ui.View):
+    def __init__(self, user_id: int, on_add, on_remove, settings_message: discord.Message | None):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.on_add = on_add
+        self.on_remove = on_remove
+        self.settings_message = settings_message
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id="auto_reply_add")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="auto_reply_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="auto_reply_cancel")
+        self.add_button.callback = self.add_callback
+        self.remove_button.callback = self.remove_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.add_button)
+        self.add_item(self.remove_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def add_callback(self, interaction: discord.Interaction):
+        await self.on_add(interaction, self.settings_message)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        await self.on_remove(interaction, self.settings_message)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        self.add_button.disabled = True
+        self.remove_button.disabled = True
+        self.cancel_button.disabled = True
+        try:
+            await interaction.response.edit_message(view=self)
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+
+class ChannelEditChoiceView(discord.ui.View):
+    def __init__(self, user_id: int, setting_name: str, on_add, on_remove, settings_message: discord.Message):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.setting_name = setting_name
+        self.on_add = on_add
+        self.on_remove = on_remove
+        self.settings_message = settings_message
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id="channel_edit_add")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="channel_edit_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="channel_edit_cancel")
+        self.add_button.callback = self.add_callback
+        self.remove_button.callback = self.remove_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.add_button)
+        self.add_item(self.remove_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def add_callback(self, interaction: discord.Interaction):
+        await self.on_add(interaction, self.settings_message)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        await self.on_remove(interaction, self.settings_message)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        self.add_button.disabled = True
+        self.remove_button.disabled = True
+        self.cancel_button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+class EconomyChoiceView(discord.ui.View):
+    def __init__(self, user_id: int, on_add, on_remove, setting_name: str, settings_message: discord.Message | None = None):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.on_add = on_add
+        self.on_remove = on_remove
+        self.setting_name = setting_name
+        self.settings_message = settings_message
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id=f"economy_add_{setting_name}")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id=f"economy_remove_{setting_name}")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id=f"economy_cancel_{setting_name}")
+        self.add_button.callback = self.add_callback
+        self.remove_button.callback = self.remove_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.add_button)
+        self.add_item(self.remove_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def add_callback(self, interaction: discord.Interaction):
+        await self.on_add(interaction, self.settings_message)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        await self.on_remove(interaction, self.settings_message)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        self.add_button.disabled = True
+        self.remove_button.disabled = True
+        self.cancel_button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+def validate_role_selection(interaction: discord.Interaction, role: discord.Role | None, role_label: str) -> str | None:
+    if role is None:
+        return None
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user.top_role <= role:
+        return f"<:disapprove:1517452151012589662> You cannot configure a {role_label} that is equal or higher than your highest role."
+    if interaction.guild.me.top_role <= role:
+        return "<:disapprove:1517452151012589662> I cannot assign that role because it is equal or higher than my highest role."
+    return None
+
+
+class EconomyRoleSelectionView(discord.ui.View):
+    def __init__(self, user_id: int, guild: discord.Guild, prompt: str, item_name: str, settings_message: discord.Message | None, callback, is_temp_role: bool):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild = guild
+        self.item_name = item_name
+        self.settings_message = settings_message
+        self.callback = callback
+        self.is_temp_role = is_temp_role
+        self.role_select = None
+
+        role_options = []
+        for role in sorted(guild.roles, key=lambda r: (r.position, r.name), reverse=True):
+            if role.is_default():
+                continue
+            role_options.append(discord.SelectOption(label=role.name[:100], value=str(role.id)))
+
+        if role_options:
+            self.role_select = discord.ui.Select(
+                placeholder=prompt,
+                options=role_options[:25],
+                min_values=1,
+                max_values=1,
+                custom_id=f"economy_role_select_{'temp' if is_temp_role else 'normal'}",
+            )
+            self.role_select.callback = self.on_role_selected
+            self.add_item(self.role_select)
+
+        self.no_button = Button(label="No", style=discord.ButtonStyle.secondary, custom_id=f"economy_role_none_{'temp' if is_temp_role else 'normal'}")
+        self.no_button.callback = self.on_no_selected
+        self.add_item(self.no_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_role_selected(self, interaction: discord.Interaction):
+        role_id = int(self.role_select.values[0])
+        await self.callback(interaction, role_id, self.item_name, self.settings_message, self.is_temp_role)
+
+    async def on_no_selected(self, interaction: discord.Interaction):
+        await self.callback(interaction, None, self.item_name, self.settings_message, self.is_temp_role)
+
+
+class EconomySettingsView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str, color: discord.Color):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.color = color
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        shop_items = guild.get("shop", {})
+        uses_items = guild.get("item_uses", {})
+        priced_items = guild.get("item_values", {})
+        recipes = guild.get("recipes", {})
+
+        self.shop_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="economy_shop_edit")
+        self.uses_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="economy_uses_edit")
+        self.prices_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="economy_prices_edit")
+        self.crafts_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="economy_crafts_edit")
+
+        self.shop_button.callback = self.handle_shop_edit
+        self.uses_button.callback = self.handle_uses_edit
+        self.prices_button.callback = self.handle_prices_edit
+        self.crafts_button.callback = self.handle_crafts_edit
+
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="economy_settings_back")
+        self.back_button.callback = self.handle_back
+
+        shop_summary = ", ".join(list(shop_items.keys())[:6]) if shop_items else "None"
+        uses_summary = ", ".join(list(uses_items.keys())[:6]) if uses_items else "None"
+        prices_summary = ", ".join(list(priced_items.keys())[:6]) if priced_items else "None"
+        crafts_summary = ", ".join(list(recipes.keys())[:6]) if recipes else "None"
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Economy settings**"),
+            TextDisplay("Configure the economy systems below."),
+            Separator(),
+            Section(f"<:money:1517580310395486239> Shop items\n{shop_summary}", accessory=self.shop_button),
+            Section(f"<:Vial:1517681553377857628> Item uses\n{uses_summary}", accessory=self.uses_button),
+            Section(f"<:money:1517580310395486239> Item prices\n{prices_summary}", accessory=self.prices_button),
+            Section(f"<:craft:1518348021161660539> Crafting recipes\n{crafts_summary}", accessory=self.crafts_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh_settings_message(self, interaction: discord.Interaction, view: discord.ui.View, settings_message: discord.Message | None = None):
+        if settings_message is None:
+            settings_message = interaction.message
+            if settings_message is None:
+                try:
+                    settings_message = await interaction.original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    settings_message = None
+        if settings_message is None:
+            return
+        try:
+            await settings_message.edit(view=view)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        try:
+            await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+            return
+        except Exception:
+            pass
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:
+            pass
+
+    async def handle_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+    async def handle_shop_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with Shop items?",
+            view=EconomyChoiceView(self.user_id, self.open_shop_add, self.open_shop_remove, "shop", settings_message),
+            ephemeral=True,
+        )
+
+    async def open_shop_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyShopAddModal(self.add_shop_item, self.guild_id, settings_message))
+
+    async def open_shop_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyShopRemoveModal(self.remove_shop_item, self.guild_id, settings_message))
+
+    async def add_shop_item(self, interaction: discord.Interaction, name: str, desc: str, price: int, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        guild["shop"][normalize_item(name)] = {"desc": desc, "price": price}
+        save_data(data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Shop item **{normalize_item(name)}** saved.", ephemeral=True)
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_shop_item(self, interaction: discord.Interaction, name: str, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        canonical = find_item_key(guild.get("shop", {}), name)
+        if canonical:
+            del guild["shop"][canonical]
+            save_data(data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Removed shop item **{canonical}**.", ephemeral=True)
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> No shop item found for **{name}**.", ephemeral=True)
+
+    async def handle_uses_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with Item uses?",
+            view=EconomyChoiceView(self.user_id, self.open_uses_add, self.open_uses_remove, "uses", settings_message),
+            ephemeral=True,
+        )
+
+    async def open_uses_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyUseAddModal(self.add_use_item, self.guild_id, settings_message))
+
+    async def open_uses_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyUseRemoveModal(self.remove_use_item, self.guild_id, settings_message))
+
+    async def add_use_item(self, interaction: discord.Interaction, item: str, money: int, xp: int, message: str, give_item: str | None, give_item_amount: int, settings_message: discord.Message | None):
+        item_name = normalize_item(item)
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        guild["item_uses"][item_name] = {
+            "money": money,
+            "xp": xp,
+            "message": message or "Used item!",
+            "role_id": None,
+            "temp_role_id": None,
+            "duration": 0,
+            "delay": 0,
+            "instant_message": None,
+            "give_item": normalize_item(give_item) if give_item else None,
+            "give_item_amount": give_item_amount,
+        }
+        save_data(data)
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        await interaction.response.send_message(
+            f"<:approve:1517452125687513158> Use effect for **{item_name}** saved. Choose a role to grant when it is used. Press No to skip.",
+            view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a role", item_name, settings_message, self.handle_use_role_selection, False),
+            ephemeral=True,
+        )
+
+    async def handle_use_role_selection(self, interaction: discord.Interaction, role_id: int | None, item_name: str, settings_message: discord.Message | None, is_temp_role: bool):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        effect = guild.get("item_uses", {}).get(item_name)
+        if effect is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> That item use entry no longer exists.", ephemeral=True)
+            return
+
+        role = interaction.guild.get_role(role_id) if interaction.guild and role_id else None
+        if role_id and role is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The selected role is no longer available.", ephemeral=True)
+            return
+
+        role_error = validate_role_selection(interaction, role, "temporary role reward" if is_temp_role else "role reward")
+        if role_error:
+            await interaction.response.send_message(role_error, ephemeral=True)
+            return
+
+        if is_temp_role:
+            effect["temp_role_id"] = role_id
+            save_data(data)
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+            if role_id is None:
+                await interaction.response.send_message(
+                    f"<:approve:1517452125687513158> Temp role setup skipped for **{item_name}**.",
+                    ephemeral=True,
+                )
+            else:
+                await interaction.response.send_modal(
+                    EconomyTempRoleDurationModal(self.handle_temp_role_duration_submit, self.guild_id, item_name, settings_message)
+                )
+            return
+
+        effect["role_id"] = role_id
+        save_data(data)
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        if role_id is None:
+            await interaction.response.send_message(
+                f"<:approve:1517452125687513158> Role setup skipped for **{item_name}**. Choose a temporary role next, or press No to skip.",
+                view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"<:approve:1517452125687513158> Role saved for **{item_name}**. Choose a temporary role next, or press No to skip.",
+            view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
+            ephemeral=True,
+        )
+
+    async def handle_temp_role_duration_submit(self, interaction: discord.Interaction, days: int, hours: int, minutes: int, seconds: int, item_name: str, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        effect = guild.get("item_uses", {}).get(item_name)
+        if effect is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> That item use entry no longer exists.", ephemeral=True)
+            return
+
+        effect["duration"] = max(0, days * 86400 + hours * 3600 + minutes * 60 + seconds)
+        save_data(data)
+        await interaction.response.send_message(
+            f"<:approve:1517452125687513158> Temp role duration saved for **{item_name}**.",
+            ephemeral=True,
+        )
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_use_item(self, interaction: discord.Interaction, item: str, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        canonical = find_item_key(guild.get("item_uses", {}), item)
+        if canonical:
+            del guild["item_uses"][canonical]
+            save_data(data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Removed use effect for **{canonical}**.", ephemeral=True)
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> No use effect found for **{item}**.", ephemeral=True)
+
+    async def handle_prices_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with Item prices?",
+            view=EconomyChoiceView(self.user_id, self.open_prices_add, self.open_prices_remove, "prices", settings_message),
+            ephemeral=True,
+        )
+
+    async def open_prices_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyPriceSetModal(self.set_price_item, self.guild_id, settings_message))
+
+    async def open_prices_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyPriceRemoveModal(self.remove_price_item, self.guild_id, settings_message))
+
+    async def set_price_item(self, interaction: discord.Interaction, item: str, value: int, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        guild["item_values"][normalize_item(item)] = value
+        save_data(data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Price for **{normalize_item(item)}** saved.", ephemeral=True)
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_price_item(self, interaction: discord.Interaction, item: str, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        canonical = find_item_key(guild.get("item_values", {}), item)
+        if canonical:
+            del guild["item_values"][canonical]
+            save_data(data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Removed price for **{canonical}**.", ephemeral=True)
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> No price found for **{item}**.", ephemeral=True)
+
+    async def handle_crafts_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with Crafting recipes?",
+            view=EconomyChoiceView(self.user_id, self.open_craft_add, self.open_craft_remove, "crafts", settings_message),
+            ephemeral=True,
+        )
+
+    async def open_craft_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyCraftAddModal(self.add_craft_item, self.guild_id, settings_message))
+
+    async def open_craft_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(EconomyCraftRemoveModal(self.remove_craft_item, self.guild_id, settings_message))
+
+    async def add_craft_item(self, interaction: discord.Interaction, item: str, req1_name: str, req1_count: int, req2_name: str | None, req2_count: int, delay: int, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        recipe = {"reqs": {normalize_item(req1_name): req1_count}, "delay": delay}
+        if req2_name:
+            recipe["reqs"][normalize_item(req2_name)] = req2_count
+        guild["recipes"][normalize_item(item)] = recipe
+        save_data(data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Craft recipe for **{normalize_item(item)}** saved.", ephemeral=True)
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_craft_item(self, interaction: discord.Interaction, item: str, settings_message: discord.Message | None):
+        data = load_data()
+        guild = get_guild_data(data, self.guild_id)
+        canonical = find_item_key(guild.get("recipes", {}), item)
+        if canonical:
+            del guild["recipes"][canonical]
+            save_data(data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Removed craft recipe for **{canonical}**.", ephemeral=True)
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> No craft recipe found for **{item}**.", ephemeral=True)
+
+
+def parse_item_amount_entry(value: str, default_amount: int = 1):
+    text = (value or "").strip()
+    if not text:
+        return None, default_amount
+    if ":" in text:
+        name, amount_text = text.rsplit(":", 1)
+        try:
+            amount = int(amount_text.strip() or default_amount)
+        except ValueError:
+            amount = default_amount
+        return (name.strip() or None), amount
+    return text, default_amount
+
+
+class EconomyTempRoleDurationModal(Modal):
+    def __init__(self, callback, guild_id: str, item_name: str, settings_message: discord.Message | None):
+        super().__init__(title="Set temp role duration")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.item_name = item_name
+        self.settings_message = settings_message
+        self.days_input = TextInput(label="Days", placeholder="0", required=True, max_length=10)
+        self.hours_input = TextInput(label="Hours", placeholder="0", required=True, max_length=10)
+        self.minutes_input = TextInput(label="Minutes", placeholder="0", required=True, max_length=10)
+        self.seconds_input = TextInput(label="Seconds", placeholder="0", required=True, max_length=10)
+        self.add_item(self.days_input)
+        self.add_item(self.hours_input)
+        self.add_item(self.minutes_input)
+        self.add_item(self.seconds_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            days = int(self.days_input.value or 0)
+            hours = int(self.hours_input.value or 0)
+            minutes = int(self.minutes_input.value or 0)
+            seconds = int(self.seconds_input.value or 0)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Days, hours, minutes, and seconds must be numbers.", ephemeral=True)
+            return
+        await self.callback(interaction, days, hours, minutes, seconds, self.item_name, self.settings_message)
+
+
+class EconomyShopAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add shop item")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.name_input = TextInput(label="Item name", placeholder="Name of the shop item", required=True, max_length=100)
+        self.desc_input = TextInput(label="Description", placeholder="Short description", required=True, max_length=200)
+        self.price_input = TextInput(label="Price", placeholder="Item price", required=True, max_length=10)
+        self.add_item(self.name_input)
+        self.add_item(self.desc_input)
+        self.add_item(self.price_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            price = int(self.price_input.value)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Price must be a number.", ephemeral=True)
+            return
+        await self.callback(interaction, self.name_input.value.strip(), self.desc_input.value.strip(), price, self.settings_message)
+
+
+class EconomyShopRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove shop item")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.name_input = TextInput(label="Item name", placeholder="Item to remove", required=True, max_length=100)
+        self.add_item(self.name_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.name_input.value.strip(), self.settings_message)
+
+
+class EconomyUseAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add item use")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item", placeholder="Item name", required=True, max_length=100)
+        self.money_input = TextInput(label="Money reward", placeholder="0", required=True, max_length=10)
+        self.xp_input = TextInput(label="XP reward", placeholder="0", required=True, max_length=10)
+        self.message_input = TextInput(label="Response message", placeholder="Used item!", required=False, max_length=200)
+        self.give_item_input = TextInput(label="Give item (Item:Amount)", placeholder="Optional item:amount", required=False, max_length=100)
+        self.add_item(self.item_input)
+        self.add_item(self.money_input)
+        self.add_item(self.xp_input)
+        self.add_item(self.message_input)
+        self.add_item(self.give_item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            money = int(self.money_input.value or 0)
+            xp = int(self.xp_input.value or 0)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Money/XP must be numbers.", ephemeral=True)
+            return
+
+        give_item, give_amount = parse_item_amount_entry(self.give_item_input.value, default_amount=1)
+
+        await self.callback(interaction, self.item_input.value.strip(), money, xp, self.message_input.value.strip(), give_item, give_amount, self.settings_message)
+
+
+class EconomyUseRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove item use")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item", placeholder="Item to remove", required=True, max_length=100)
+        self.add_item(self.item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.item_input.value.strip(), self.settings_message)
+
+
+class EconomyPriceSetModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Set item price")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item", placeholder="Item name", required=True, max_length=100)
+        self.price_input = TextInput(label="Price", placeholder="Sell price", required=True, max_length=10)
+        self.add_item(self.item_input)
+        self.add_item(self.price_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            value = int(self.price_input.value)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Price must be a number.", ephemeral=True)
+            return
+        await self.callback(interaction, self.item_input.value.strip(), value, self.settings_message)
+
+
+class EconomyPriceRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove item price")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item", placeholder="Item to remove", required=True, max_length=100)
+        self.add_item(self.item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.item_input.value.strip(), self.settings_message)
+
+
+class EconomyCraftAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add craft recipe")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Crafted item", placeholder="Result item", required=True, max_length=100)
+        self.req1_input = TextInput(label="Requirement 1 (Item:Amount)", placeholder="Ingredient:amount", required=True, max_length=100)
+        self.req2_input = TextInput(label="Requirement 2 (Item:Amount)", placeholder="Optional ingredient:amount", required=False, max_length=100)
+        self.delay_input = TextInput(label="Delay seconds", placeholder="0", required=True, max_length=10)
+        self.add_item(self.item_input)
+        self.add_item(self.req1_input)
+        self.add_item(self.req2_input)
+        self.add_item(self.delay_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            delay = int(self.delay_input.value or 0)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Delay must be a number.", ephemeral=True)
+            return
+
+        req1_name, req1_count = parse_item_amount_entry(self.req1_input.value, default_amount=1)
+        req2_name, req2_count = (None, 1)
+        if self.req2_input.value.strip():
+            req2_name, req2_count = parse_item_amount_entry(self.req2_input.value, default_amount=1)
+
+        await self.callback(interaction, self.item_input.value.strip(), req1_name, req1_count, req2_name, req2_count, delay, self.settings_message)
+
+
+class EconomyCraftRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove craft recipe")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Crafted item", placeholder="Recipe to remove", required=True, max_length=100)
+        self.add_item(self.item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.item_input.value.strip(), self.settings_message)
+
+
+class LevelRoleSelectionView(discord.ui.View):
+    def __init__(self, user_id: int, guild: discord.Guild, prompt: str, level: int, reward_data: dict, settings_message: discord.Message | None, callback, is_temp_role: bool):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild = guild
+        self.level = level
+        self.reward_data = reward_data
+        self.settings_message = settings_message
+        self.callback = callback
+        self.is_temp_role = is_temp_role
+        self.role_select = None
+
+        role_options = []
+        for role in sorted(guild.roles, key=lambda r: (r.position, r.name), reverse=True):
+            if role.is_default():
+                continue
+            role_options.append(discord.SelectOption(label=role.name[:100], value=str(role.id)))
+
+        if role_options:
+            self.role_select = discord.ui.Select(
+                placeholder=prompt,
+                options=role_options[:25],
+                min_values=1,
+                max_values=1,
+                custom_id=f"level_role_select_{'temp' if is_temp_role else 'normal'}",
+            )
+            self.role_select.callback = self.on_role_selected
+            self.add_item(self.role_select)
+
+        self.no_button = Button(label="No", style=discord.ButtonStyle.secondary, custom_id=f"level_role_none_{'temp' if is_temp_role else 'normal'}")
+        self.no_button.callback = self.on_no_selected
+        self.add_item(self.no_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def on_role_selected(self, interaction: discord.Interaction):
+        role_id = int(self.role_select.values[0])
+        if self.is_temp_role:
+            self.reward_data["temp_role_id"] = role_id
+        else:
+            self.reward_data["role_id"] = role_id
+        await self.callback(interaction, self.reward_data, self.level, self.settings_message, self.is_temp_role)
+
+    async def on_no_selected(self, interaction: discord.Interaction):
+        if self.is_temp_role:
+            self.reward_data["temp_role_id"] = None
+        else:
+            self.reward_data["role_id"] = None
+        await self.callback(interaction, self.reward_data, self.level, self.settings_message, self.is_temp_role)
+
+
+class LevelRewardModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Set level reward")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.level_input = TextInput(label="Level", placeholder="1", required=True, max_length=10)
+        self.duration_input = TextInput(label="Temp role duration (seconds)", placeholder="0", required=True, max_length=10)
+        self.money_input = TextInput(label="Money reward", placeholder="0", required=True, max_length=10)
+        self.xp_input = TextInput(label="XP reward", placeholder="0", required=True, max_length=10)
+        self.item_input = TextInput(label="Item (Item:Amount)", placeholder="Optional item:amount", required=False, max_length=100)
+        self.add_item(self.level_input)
+        self.add_item(self.duration_input)
+        self.add_item(self.money_input)
+        self.add_item(self.xp_input)
+        self.add_item(self.item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            level = int(self.level_input.value.strip())
+            duration = int(self.duration_input.value.strip() or 0)
+            money = int(self.money_input.value.strip() or 0)
+            xp = int(self.xp_input.value.strip() or 0)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Level, duration, money, and XP must be numbers.", ephemeral=True)
+            return
+
+        give_item, give_amount = parse_item_amount_entry(self.item_input.value, default_amount=1)
+        reward_data = {
+            "role_id": None,
+            "temp_role_id": None,
+            "duration": max(0, duration),
+            "money": money,
+            "xp": xp,
+            "give_item": normalize_item(give_item) if give_item else None,
+            "give_item_amount": give_amount,
+        }
+        await self.callback(interaction, reward_data, level, self.settings_message)
+
+
+class LevelSettingsView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str, color: discord.Color, settings_message: discord.Message | None = None):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.color = color
+        self.settings_message = settings_message
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        levels = load_levels()
+        rewards = levels.get(self.guild_id, {}).get("config", {}).get("rewards", {})
+        guild = bot.get_guild(int(self.guild_id)) if self.guild_id.isdigit() else None
+
+        summary_lines = []
+        for level_key, reward_data in sorted(rewards.items(), key=lambda item: int(item[0]) if str(item[0]).isdigit() else 999999)[:6]:
+            summary_lines.append(f"Lvl {level_key}: {format_level_reward_summary(guild, level_key, reward_data) if guild else 'Configured'}")
+
+        self.set_button = Button(label="Set reward", style=discord.ButtonStyle.primary, custom_id="level_settings_set")
+        self.set_button.callback = self.handle_set
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="level_settings_back")
+        self.back_button.callback = self.handle_back
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Level settings**"),
+            TextDisplay("Configure level-based rewards below."),
+            Separator(),
+            Section("<:box:1517581439552585759> Current rewards\n" + ("\n".join(summary_lines) if summary_lines else "None"), accessory=self.set_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh_settings_message(self, interaction: discord.Interaction, view: discord.ui.View):
+        settings_message = self.settings_message
+        if settings_message is None:
+            settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except (discord.NotFound, discord.HTTPException):
+                settings_message = None
+        if settings_message is None:
+            return
+        try:
+            await settings_message.edit(view=view)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        try:
+            await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+            return
+        except Exception:
+            pass
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:
+            pass
+
+    async def handle_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+    async def handle_set(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(LevelRewardModal(self.handle_reward_submit, self.guild_id, self.settings_message))
+
+    async def handle_reward_submit(self, interaction: discord.Interaction, reward_data: dict, level: int, settings_message: discord.Message | None):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This can only be used in a server.", ephemeral=True)
+            return
+
+        await interaction.response.send_message(
+            f"<:approve:1517452125687513158> Level {level} reward details saved. Choose a role to grant when this level is reached. Press No to skip.",
+            view=LevelRoleSelectionView(self.user_id, guild, "Choose a role", level, reward_data, settings_message, self.handle_level_role_selection, False),
+            ephemeral=True,
+        )
+
+    async def handle_level_role_selection(self, interaction: discord.Interaction, reward_data: dict, level: int, settings_message: discord.Message | None, is_temp_role: bool):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This can only be used in a server.", ephemeral=True)
+            return
+
+        role_id = reward_data.get("temp_role_id" if is_temp_role else "role_id")
+        role = guild.get_role(role_id) if role_id else None
+        if role_id and role is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> The selected role is no longer available.", ephemeral=True)
+            return
+
+        role_error = validate_role_selection(interaction, role, "temporary role reward" if is_temp_role else "role reward")
+        if role_error:
+            await interaction.response.send_message(role_error, ephemeral=True)
+            return
+
+        if is_temp_role:
+            save_level_reward_data(str(guild.id), level, reward_data)
+            await interaction.response.send_message(f"<:approve:1517452125687513158> Level {level} reward saved.", ephemeral=True)
+            await self.refresh_settings_message(interaction, LevelSettingsView(self.user_id, self.guild_id, self.color, settings_message=self.settings_message))
+            return
+
+        if role_id is None:
+            await interaction.response.send_message(
+                f"<:approve:1517452125687513158> Role setup skipped for level {level}. Choose a temporary role next, or press No to skip.",
+                view=LevelRoleSelectionView(self.user_id, guild, "Choose a temporary role", level, reward_data, settings_message, self.handle_level_role_selection, True),
+                ephemeral=True,
+            )
+            return
+
+        await interaction.response.send_message(
+            f"<:approve:1517452125687513158> Role saved for level {level}. Choose a temporary role next, or press No to skip.",
+            view=LevelRoleSelectionView(self.user_id, guild, "Choose a temporary role", level, reward_data, settings_message, self.handle_level_role_selection, True),
+            ephemeral=True,
+        )
+
+
+class ChannelSettingsView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str, color: discord.Color, page: int = 1):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.page = page
+        self.color = color
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        guild = bot.get_guild(int(self.guild_id))
+        guild_config, _ = get_guild_config(self.guild_id)
+        welcome_channel = format_channel_reference(guild, guild_config.get("welcome_channel_id")) if guild else "None"
+        goodbye_channel = format_channel_reference(guild, guild_config.get("goodbye_channel_id")) if guild else "None"
+        level_channel = "None"
+        level_id = get_level_channel_id(self.guild_id)
+        if level_id:
+            level_channel = format_channel_reference(guild, level_id) if guild else "None"
+        admin_channels = get_admin_log_channel_mentions(guild) if guild else []
+        admin_label = "Remove" if admin_channels else "Set"
+        admin_value = "\n".join(admin_channels) if admin_channels else "None"
+
+        board_entries = get_guild_board_entries(self.guild_id)
+        counter_entries = get_guild_counter_entries(guild) if guild else []
+        locked_entries = get_locked_channel_mentions(guild) if guild else []
+
+        if self.page == 1:
+            self.welcome_button = Button(label="Remove" if guild_config.get("welcome_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_welcome_toggle")
+            self.goodbye_button = Button(label="Remove" if guild_config.get("goodbye_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_goodbye_toggle")
+            self.level_button = Button(label="Remove" if level_id else "Set", style=discord.ButtonStyle.primary, custom_id="channel_level_toggle")
+            self.admin_button = Button(label=admin_label, style=discord.ButtonStyle.primary, custom_id="channel_admin_toggle")
+
+            self.welcome_button.callback = self.handle_welcome_toggle
+            self.goodbye_button.callback = self.handle_goodbye_toggle
+            self.level_button.callback = self.handle_level_toggle
+            self.admin_button.callback = self.handle_admin_toggle
+
+            page_button = Button(label="Page 2", style=discord.ButtonStyle.secondary, custom_id="channel_settings_next")
+            page_button.callback = self.open_page_two
+        else:
+            self.board_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="channel_board_edit")
+            self.counter_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="channel_counter_edit")
+            self.locked_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="channel_locked_edit")
+
+            self.board_button.callback = self.handle_board_edit
+            self.counter_button.callback = self.handle_counter_edit
+            self.locked_button.callback = self.handle_locked_edit
+
+            page_button = Button(label="Page 1", style=discord.ButtonStyle.secondary, custom_id="channel_settings_prev")
+            page_button.callback = self.open_page_one
+
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="channel_settings_back")
+        self.back_button.callback = self.handle_back
+
+        container_items = [
+            TextDisplay("<:gear:1517576939097952496> **Channel settings**"),
+            TextDisplay(f"Page {self.page}/2 - Set and remove channel settings below."),
+            Separator(),
+        ]
+
+        if self.page == 1:
+            container_items += [
+                Section(f"<:plus:1518348756570079262> Welcome Channel\n{welcome_channel}", accessory=self.welcome_button),
+                Section(f"<:minus:1518348754111959150> Goodbye Channel\n{goodbye_channel}", accessory=self.goodbye_button),
+                Section(f"<:chalice:1517579767573123092> Level-up Announce Channel\n{level_channel}", accessory=self.level_button),
+                Section(f"<:unlocked:1517574880034558102> Admin Log Channel\n{admin_value}", accessory=self.admin_button),
+            ]
+        else:
+            board_text = "\n".join(board_entries) if board_entries else "None"
+            counter_text = "\n".join(counter_entries) if counter_entries else "None"
+            locked_text = "\n".join(locked_entries) if locked_entries else "None"
+            container_items += [
+                Section(f"<:list:1517497572770451567> Board Channels\n{board_text}", accessory=self.board_button),
+                Section(f"<:multi:1518348755261460661> Counter Channels\n{counter_text}", accessory=self.counter_button),
+                Section(f"<:locked:1517574877257924809> Locked Channels\n{locked_text}", accessory=self.locked_button),
+            ]
+
+        container = Container(*container_items, accent_color=self.color)
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(page_button, self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def refresh_settings_message(self, interaction: discord.Interaction, view: discord.ui.View, settings_message: discord.Message | None = None):
+        if settings_message is None:
+            settings_message = interaction.message
+            if settings_message is None:
+                try:
+                    settings_message = await interaction.original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    settings_message = None
+        if settings_message is None:
+            return
+        try:
+            await settings_message.edit(view=view)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+
+        try:
+            await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+            return
+        except Exception:
+            pass
+
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:
+            pass
+
+    async def handle_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+    async def handle_close(self, interaction: discord.Interaction):
+        for item in self.children:
+            if isinstance(item, discord.ui.Button):
+                item.disabled = True
+        await interaction.response.edit_message(view=self)
+
+    async def open_page_two(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2))
+
+    async def open_page_one(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1))
+
+    async def handle_welcome_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        guild_config, _ = get_guild_config(self.guild_id)
+        if guild_config.get("welcome_channel_id"):
+            await interaction.response.send_message("Please confirm removal of the welcome channel.", view=ConfirmRemoveView(self.user_id, self.confirm_remove_welcome, interaction.message), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the welcome channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select welcome channel", self.set_welcome_channel, interaction.message),
+            ephemeral=True,
+        )
+
+    async def set_welcome_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["welcome_channel_id"] = channel.id
+        save_guild_data(data)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Welcome channel set to {channel.mention}", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_welcome(self, interaction: discord.Interaction, original_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["welcome_channel_id"] = None
+        save_guild_data(data)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send("<:trash:1517497581058527404> Welcome channel has been removed.", ephemeral=True)
+
+    async def handle_goodbye_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        guild_config, _ = get_guild_config(self.guild_id)
+        if guild_config.get("goodbye_channel_id"):
+            await interaction.response.send_message("Please confirm removal of the goodbye channel.", view=ConfirmRemoveView(self.user_id, self.confirm_remove_goodbye, interaction.message), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the goodbye channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select goodbye channel", self.set_goodbye_channel, interaction.message),
+            ephemeral=True,
+        )
+
+    async def set_goodbye_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["goodbye_channel_id"] = channel.id
+        save_guild_data(data)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Goodbye channel set to {channel.mention}", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_goodbye(self, interaction: discord.Interaction, original_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["goodbye_channel_id"] = None
+        save_guild_data(data)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send("<:trash:1517497581058527404> Goodbye channel has been removed.", ephemeral=True)
+
+    async def handle_level_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        level_id = get_level_channel_id(self.guild_id)
+        if level_id:
+            await interaction.response.send_message("Please confirm removal of the level-up announce channel.", view=ConfirmRemoveView(self.user_id, self.confirm_remove_level_channel, interaction.message), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the level-up announce channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select level-up announce channel", self.set_level_channel, interaction.message),
+            ephemeral=True,
+        )
+
+    async def set_level_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        set_level_channel(self.guild_id, channel.id)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Level-up announce channel set to {channel.mention}", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_level_channel(self, interaction: discord.Interaction, original_message: discord.Message):
+        set_level_channel(self.guild_id, None)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send("<:trash:1517497581058527404> Level-up announce channel has been removed.", ephemeral=True)
+
+    async def handle_admin_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        admin_ids = get_guild_admin_log_channel_ids(guild)
+        if admin_ids:
+            channel = guild.get_channel(admin_ids[0])
+            if channel:
+                await interaction.response.send_message(
+                    f"Confirm removing admin logging from {channel.mention}?",
+                    view=ConfirmRemoveView(self.user_id, self.confirm_remove_admin_log, interaction.message),
+                    ephemeral=True,
+                )
+                return
+        await interaction.response.send_message(
+            "Select the admin log channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select admin log channel", self.add_admin_log_channel, interaction.message),
+            ephemeral=True,
+        )
+
+    async def add_admin_log_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        admin_log_channels[channel.id] = True
+        save_lock_config(locked_channels, admin_log_channels)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Admin logging enabled in {channel.mention}", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_admin_log(self, interaction: discord.Interaction, original_message: discord.Message):
+        admin_ids = get_guild_admin_log_channel_ids(interaction.guild)
+        if admin_ids:
+            admin_log_channels.pop(admin_ids[0], None)
+            save_lock_config(locked_channels, admin_log_channels)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send(f"<:trash:1517497581058527404> Admin logging disabled.", ephemeral=True)
+
+    async def handle_board_edit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "What would you like to do with Board Channels?",
+            view=ChannelEditChoiceView(self.user_id, "Board Channels", self.open_board_add, self.open_board_remove, interaction.message),
+            ephemeral=True,
+        )
+
+    async def open_board_add(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the board channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select board channel", self.board_channel_selected, settings_message),
+            ephemeral=True,
+        )
+
+    async def board_channel_selected(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        if not interaction.guild or not interaction.channel:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> Unable to continue board configuration.", ephemeral=True)
+        prompt = await interaction.channel.send(
+            f"{interaction.user.mention}, react to this message with the emoji you want to use for the board. You have 60 seconds.",
+        )
+        await interaction.response.send_message("React to the channel prompt to choose the board emoji.", ephemeral=True)
+
+        def check(reaction, user):
+            return (
+                user.id == interaction.user.id
+                and reaction.message.id == prompt.id
+            )
+
+        try:
+            reaction, user = await bot.wait_for("reaction_add", timeout=60.0, check=check)
+        except asyncio.TimeoutError:
+            await prompt.delete()
+            return await interaction.followup.send("<:disapprove:1517452151012589662> Emoji selection timed out.", ephemeral=True)
+
+        emoji = str(reaction.emoji)
+        await prompt.delete()
+        await interaction.followup.send(
+            "Emoji received. Set the required reaction count.",
+            view=BoardCountPromptView(self.user_id, channel, emoji, settings_message, self.add_board_channel),
+            ephemeral=True,
+        )
+
+    async def add_board_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, emoji: str, required_count: int, settings_message: discord.Message):
+        board_data = load_board_data()
+        if self.guild_id not in board_data:
+            board_data[self.guild_id] = {}
+        board_data[self.guild_id][emoji] = {
+            "channel_id": channel.id,
+            "required_count": required_count,
+            "tracked_messages": {},
+        }
+        save_board_data(board_data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Board for {emoji} saved to {channel.mention}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+
+    async def open_board_remove(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the board channel to remove:",
+            view=ChannelSelectorView(self.user_id, guild, "Select board channel to remove", self.remove_board_channel, settings_message),
+            ephemeral=True,
+        )
+
+    async def remove_board_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        board_data = load_board_data()
+        if self.guild_id not in board_data:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> No board channels are configured.", ephemeral=True)
+            return
+        removed = False
+        for emoji_key, cfg in list(board_data[self.guild_id].items()):
+            if cfg.get("channel_id") == channel.id:
+                del board_data[self.guild_id][emoji_key]
+                removed = True
+        if removed:
+            if not board_data[self.guild_id]:
+                del board_data[self.guild_id]
+            save_board_data(board_data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Removed board channel {channel.mention}.", ephemeral=True)
+            await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+        else:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> That channel is not configured as a board channel.", ephemeral=True)
+
+    async def handle_counter_edit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "What would you like to do with Counter Channels?",
+            view=ChannelEditChoiceView(self.user_id, "Counter Channels", self.open_counter_add, self.open_counter_remove, interaction.message),
+            ephemeral=True,
+        )
+
+    async def open_counter_add(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the counter channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select counter channel", self.counter_channel_selected, settings_message),
+            ephemeral=True,
+        )
+
+    async def counter_channel_selected(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        async def yes_callback(interact: discord.Interaction):
+            await self.add_counter_channel(interact, channel, True, settings_message)
+
+        async def no_callback(interact: discord.Interaction):
+            await self.add_counter_channel(interact, channel, False, settings_message)
+
+        await interaction.response.send_message(
+            f"Should failures reset the counter in {channel.mention}?",
+            view=YesNoView(self.user_id, yes_callback, no_callback),
+            ephemeral=True,
+        )
+
+    async def add_counter_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, reset_on_fail: bool, settings_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config.setdefault("counter_channels", {})[str(channel.id)] = {
+            "current_value": 0,
+            "last_user_id": None,
+            "reset_on_fail": reset_on_fail,
+        }
+        save_guild_data(data)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Counter channel configured for {channel.mention}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+
+    async def open_counter_remove(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the counter channel to remove:",
+            view=ChannelSelectorView(self.user_id, guild, "Select counter channel to remove", self.remove_counter_channel, settings_message),
+            ephemeral=True,
+        )
+
+    async def remove_counter_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        if str(channel.id) not in guild_config.get("counter_channels", {}):
+            await safe_send(interaction, "<:disapprove:1517452151012589662> That channel is not configured as a counter channel.", ephemeral=True)
+            return
+        del guild_config["counter_channels"][str(channel.id)]
+        save_guild_data(data)
+        await safe_send(interaction, f"<:trash:1517497581058527404> Removed counter channel {channel.mention}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+
+    async def handle_locked_edit(self, interaction: discord.Interaction):
+        await interaction.response.send_message(
+            "What would you like to do with Locked Channels?",
+            view=ChannelEditChoiceView(self.user_id, "Locked Channels", self.open_locked_add, self.open_locked_remove, interaction.message),
+            ephemeral=True,
+        )
+
+    async def open_locked_add(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the locked channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select locked channel", self.add_locked_channel, settings_message),
+            ephemeral=True,
+        )
+
+    async def add_locked_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        locked_channels[channel.id] = True
+        save_lock_config(locked_channels, admin_log_channels)
+        await safe_send(interaction, f"<:approve:1517452125687513158> Locked channel enabled for {channel.mention}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+
+    async def open_locked_remove(self, interaction: discord.Interaction, settings_message: discord.Message):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        await interaction.response.send_message(
+            "Select the locked channel to remove:",
+            view=ChannelSelectorView(self.user_id, guild, "Select locked channel to remove", self.remove_locked_channel, settings_message),
+            ephemeral=True,
+        )
+
+    async def remove_locked_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        if channel.id not in locked_channels:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> That channel is not configured as locked.", ephemeral=True)
+            return
+        locked_channels.pop(channel.id, None)
+        save_lock_config(locked_channels, admin_log_channels)
+        await interaction.response.send_message(f"<:trash:1517497581058527404> Removed locked channel {channel.mention}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=2), settings_message)
+
+
+@bot.tree.command(name="settings", description="Open a quick settings menu for your personal and guild preferences")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def settings(interaction: discord.Interaction):
+    view = SettingsMenuView(
+        interaction.user.id,
+        interaction.user.display_name,
+        get_user_color_value(str(interaction.user.id)),
     )
-
-
-@bot.tree.command(name="set-getping", description="Toggle whether the bot pings you when it references you")
-@app_commands.allowed_installs(guilds=True, users=False)
-async def set_getping(interaction: discord.Interaction):
-    settings = load_user_settings()
-    user_settings = get_user_settings_entry(settings, str(interaction.user.id))
-    current_state = user_settings.get("user_pings", True)
-    new_state = not current_state
-    user_settings["user_pings"] = new_state
-    save_user_settings(settings)
-
-    status_text = "enabled" if new_state else "disabled"
-    await interaction.response.send_message(
-        f"<:bell:1517497562184024275> User pings are now **{status_text}** for you.",
-        ephemeral=True
-    )
+    await interaction.response.send_message(view=view, ephemeral=True)
 
 
 
