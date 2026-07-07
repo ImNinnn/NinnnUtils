@@ -12,9 +12,9 @@ this bot adds:
 
 Install Link https://discord.com/oauth2/authorize?client_id=1500798502735708281
 
-Support Server https://discord.gg/FSBPvc9zqY
+**Support Server https://discord.gg/FSBPvc9zqY**
 
 ToS and Privacy policy https://imninnn.github.io
 
 To run this bot yourself, you will need to install the python libraries, any font for the banners and ffmpeg.exe for the youtube voice feature
-and the libraries : pip install discord.py python-dotenv pillow deep-translator pypresence yt-dlp
+to get the libraries, run this pip install in the same folder as requirements.txt "**pip install -r requirements.txt**"
