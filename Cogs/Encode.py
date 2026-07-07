@@ -1,5 +1,6 @@
 from discord.ext.commands import Cog, Context, hybrid_command
-
+from discord import app_commands
+import base64, discord
 
 async def setup(bot):
     await bot.add_cog(Encode(bot))
@@ -8,7 +9,7 @@ class Encode(Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @bot.tree.command(name="encode", description="Encode text with a few algos (Base64, Base32, Base16, Binary)")
+    @hybrid_command(name="encode", description="Encode text with a few algos (Base64, Base32, Base16, Binary)")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(
@@ -23,7 +24,7 @@ class Encode(Cog):
             app_commands.Choice(name="Binary", value="binary")
         ],
     )
-    async def encode_decode_command(interaction: discord.Interaction, text: str, encoding_type: str):
+    async def encode_decode_command(self, ctx: Context, text: str, encoding_type: str):
         try:
             text_bytes = text.encode("utf-8")
             if encoding_type == "base64":
@@ -44,16 +45,16 @@ class Encode(Cog):
             embed = discord.Embed(title=title_text, color=color_choice)
             embed.add_field(name="Input:", value=f"`{text}`", inline=False)
             embed.add_field(name=field_name, value=f"`{result}`", inline=False)
-            embed.set_footer(text=f"Processed for {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
-            await interaction.response.send_message(embed=embed)
+            embed.set_footer(text=f"Processed for {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+            await ctx.send(embed=embed)
 
         except Exception as e:
-            await interaction.response.send_message(
+            await ctx.send(
                 f"<:disapprove:1517452151012589662> Operation failed. Please check that your input perfectly matches the formatting for {encoding_type}! Error: {e}",
                 ephemeral=True
             )
 
-    @bot.tree.command(name="decode", description="Decode text in a few algos back to normal text (Base64, Base32, Base16, Binary)")
+    @hybrid_command(name="decode", description="Decode text in a few algos back to normal text (Base64, Base32, Base16, Binary)")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(
@@ -68,7 +69,7 @@ class Encode(Cog):
             app_commands.Choice(name="Binary", value="binary")
         ],
     )
-    async def decode_command(interaction: discord.Interaction, text: str, encoding_type: str):
+    async def decode_command(self, ctx, text: str, encoding_type: str):
         try:
             if encoding_type == "base64":
                 result = base64.b64decode(text.encode("utf-8")).decode("utf-8")
@@ -89,11 +90,11 @@ class Encode(Cog):
             embed = discord.Embed(title=title_text, color=color_choice)
             embed.add_field(name="Input:", value=f"`{text}`", inline=False)
             embed.add_field(name=field_name, value=f"`{result}`", inline=False)
-            embed.set_footer(text=f"Processed for {interaction.user.name}", icon_url=interaction.user.display_avatar.url)
-            await interaction.response.send_message(embed=embed)
+            embed.set_footer(text=f"Processed for {ctx.author.name}", icon_url=ctx.author.display_avatar.url)
+            await ctx.send(embed=embed)
 
         except Exception as e:
-            await interaction.response.send_message(
+            await ctx.send(
                 f"<:disapprove:1517452151012589662> Operation failed. Please check that your input perfectly matches the formatting for {encoding_type}! Error: {e}",
                 ephemeral=True
             )

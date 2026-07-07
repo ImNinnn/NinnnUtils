@@ -1,4 +1,10 @@
 from discord.ext.commands import Cog, Context, hybrid_group
+from Shared.Cache import *
+from Shared.Guilds import *
+from Shared.User import *
+from Shared.Errors import *
+from datetime import datetime, timezone
+import discord
 
 async def setup(bot):
     await bot.add_cog(Ghosts(bot))
@@ -8,7 +14,7 @@ class Ghosts(Cog):
         self.bot = bot
 
     @Cog.listener()
-    async def on_message_delete(message):
+    async def on_message_delete(self, message):
         global message_cache, deleted_cache
         clean_cache()
 
@@ -48,7 +54,7 @@ class Ghosts(Cog):
                         
                         embed.timestamp = msg['created_at']
                         
-                        channel = bot.get_channel(msg['channel'])
+                        channel = self.bot.get_channel(msg['channel'])
                         if channel:
                             try:
                                 await channel.send(embed=embed)
@@ -57,7 +63,7 @@ class Ghosts(Cog):
                 break
 
     @Cog.listener()
-    async def on_message_edit(before, after):
+    async def on_message_edit(self, before, after):
         if before.author.bot:
             return
 

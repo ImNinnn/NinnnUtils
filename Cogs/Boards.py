@@ -1,4 +1,10 @@
 from discord.ext.commands import Cog, Context, hybrid_group
+from datetime import datetime, timezone
+from Shared.Boards import *
+from Shared.Errors import *
+import discord
+import random
+from main import reaction_xp_cooldowns
 
 async def setup(bot):
     await bot.add_cog(Boards(bot))
@@ -7,12 +13,12 @@ class Boards(Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @bot.event
-    async def on_raw_reaction_add(payload):
+    @Cog.listener()
+    async def on_raw_reaction_add(self, payload):
         if not payload.guild_id:
             return
 
-        guild = bot.get_guild(payload.guild_id)
+        guild = self.bot.get_guild(payload.guild_id)
         if not guild:
             return
 
@@ -50,7 +56,7 @@ class Boards(Cog):
 
         message_id_str = str(payload.message_id)
 
-        channel = bot.get_channel(payload.channel_id)
+        channel = self.bot.get_channel(payload.channel_id)
         if not channel:
             return
         try:
@@ -64,7 +70,7 @@ class Boards(Cog):
         reaction = discord.utils.get(message.reactions, emoji=payload.emoji.name if payload.emoji.is_unicode_emoji() else payload.emoji)
         current_count = reaction.count if reaction else 0
 
-        board_channel = bot.get_channel(config["channel_id"])
+        board_channel = self.bot.get_channel(config["channel_id"])
         if not board_channel:
             return
 
@@ -102,8 +108,8 @@ class Boards(Cog):
             save_board_data(board_data)
 
 
-    @bot.event
-    async def on_raw_reaction_remove(payload):
+    @Cog.listener()
+    async def on_raw_reaction_remove(self, payload):
         if not payload.guild_id:
             return
 
@@ -125,7 +131,7 @@ class Boards(Cog):
         if message_id_str not in config["tracked_messages"]:
             return
 
-        channel = bot.get_channel(payload.channel_id)
+        channel = self.bot.get_channel(payload.channel_id)
         if not channel:
             return
         try:
@@ -136,7 +142,7 @@ class Boards(Cog):
         reaction = discord.utils.get(message.reactions, emoji=payload.emoji.name if payload.emoji.is_unicode_emoji() else payload.emoji)
         current_count = reaction.count if reaction else 0
 
-        board_channel = bot.get_channel(config["channel_id"])
+        board_channel = self.bot.get_channel(config["channel_id"])
         if not board_channel:
             return
 
