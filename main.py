@@ -3,12 +3,17 @@ import ast
 import json
 import os
 import random
+import re
+import subprocess
+import sys
 import time
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import yt_dlp
 import discord
-from discord import ComponentType, TextInput, app_commands, Status
+from discord import ComponentType, app_commands, Status
+from discord.automod import AutoModRuleAction, AutoModTrigger
+from discord.enums import AutoModRuleActionType, AutoModRuleEventType, AutoModRuleTriggerType
 from discord.ext import tasks, commands
 from dotenv import load_dotenv
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -19,6 +24,8 @@ import base64
 import queue
 import threading
 import traceback
+import zipfile
+from pathlib import Path
 from discord.ui import Modal, Separator, TextInput, View, Button, LayoutView, Container, Section, TextDisplay, MediaGallery, ChannelSelect
 from pypresence import Presence
 from pypresence.types import ActivityType
@@ -42,6 +49,7 @@ raw_blacklist = os.getenv('SERVER_BLACKLIST', '')
 BLACKLISTED_GUILDS = [int(sid.strip()) for sid in raw_blacklist.split(',') if sid.strip().isdigit()]
 ACTIVITY_TEXT = os.getenv('ACTIVITY')
 SHARD_COUNT = int(os.getenv('SHARD_COUNT', '0'))
+PREFIX = os.getenv('PREFIX')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'economy.json')
@@ -53,6 +61,7 @@ LOCK_CONFIG_FILE = os.path.join(BASE_DIR, 'lock_config.json')
 FFMPEG_PATH = os.path.join(BASE_DIR, "ffmpeg.exe")
 LEVEL_FILE = os.path.join(BASE_DIR, 'level.json')
 USER_FILE = os.path.join(BASE_DIR, 'user.json')
+GIVEAWAY_FILE = os.path.join(BASE_DIR, 'giveaway.json')
 
 
 
@@ -67,7 +76,7 @@ USER_FILE = os.path.join(BASE_DIR, 'user.json')
 class MyDiscordApp(commands.AutoShardedBot):
     def __init__(self, intents, shard_count: int = 0):
         super().__init__(
-            command_prefix="n!",
+            command_prefix={PREFIX},
             intents=intents,
             shard_count=shard_count or None,
         )
@@ -98,6 +107,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
 intents.presences = True
+intents.auto_moderation_execution = True
 bot = MyDiscordApp(intents=intents, shard_count=SHARD_COUNT)
 
 
@@ -173,7 +183,7 @@ def build_song_embed(guild_id: str) -> discord.Embed | None:
     index = queue['current_index'] + 1
     total = len(queue['tracks'])
 
-    # Calculate unix timestamps for Discord dynamic time formatting
+
     end_time_unix = int(time.time() + remaining)
     discord_time_remaining = f"<t:{end_time_unix}:R>"
     if queue.get('pause_started_at') or not queue.get('track_start_time'):
@@ -541,7 +551,7 @@ local_rpc_queue = queue.Queue(maxsize=1)
 
 
 
-def load_json_file(path: str, default=None, recover_backup: bool = True):
+def load_json_file(path: str, default=None):
     if default is None:
         default = {}
 
@@ -552,17 +562,6 @@ def load_json_file(path: str, default=None, recover_backup: bool = True):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     except json.JSONDecodeError:
-        if recover_backup:
-            backup_path = path + '.bak'
-            if os.path.exists(backup_path):
-                try:
-                    with open(backup_path, 'r', encoding='utf-8') as backup_file:
-                        recovered = json.load(backup_file)
-                    save_json_file(path, recovered)
-                    print(f"Recovered {os.path.basename(path)} from backup after corruption.")
-                    return recovered
-                except (json.JSONDecodeError, OSError):
-                    pass
         print(f"Warning: {os.path.basename(path)} is corrupted and could not be loaded. Returning default.")
         return default
     except OSError:
@@ -572,20 +571,11 @@ def load_json_file(path: str, default=None, recover_backup: bool = True):
 
 def save_json_file(path: str, data, indent: int = 4):
     temp_path = path + '.tmp'
-    backup_path = path + '.bak'
-
     try:
         with open(temp_path, 'w', encoding='utf-8') as f:
             json.dump(data, f, indent=indent)
             f.flush()
             os.fsync(f.fileno())
-
-        if os.path.exists(path):
-            try:
-                os.replace(path, backup_path)
-            except OSError:
-                pass
-
         os.replace(temp_path, path)
     except OSError as e:
         print(f"Warning: unable to save {os.path.basename(path)}: {e}")
@@ -596,32 +586,382 @@ def save_json_file(path: str, data, indent: int = 4):
                 pass
 
 
-def load_levels():
-    return load_json_file(LEVEL_FILE, {})
 
+class DataManager:
+    """Unified data loading and saving for all JSON files"""
+    _cache = {}
+    
+    @classmethod
+    def load(cls, file_path: str, default=None):
+        """Load data from JSON file with optional caching"""
+        if default is None:
+            default = {}
+        return load_json_file(file_path, default)
+    
+    @classmethod
+    def save(cls, file_path: str, data):
+        """Save data to JSON file"""
+        save_json_file(file_path, data)
+
+
+def load_levels():
+    return DataManager.load(LEVEL_FILE, {})
 
 def save_levels(data):
-    save_json_file(LEVEL_FILE, data)
-
+    DataManager.save(LEVEL_FILE, data)
 
 def get_xp_needed(level: int) -> int:
     return 100 + (level * 10)
 
-
 def load_data():
-    return load_json_file(DATA_FILE, {})
-
+    return DataManager.load(DATA_FILE, {})
 
 def save_data(data):
-    save_json_file(DATA_FILE, data)
-
+    DataManager.save(DATA_FILE, data)
 
 def load_user_settings():
-    return load_json_file(USER_FILE, {})
-
+    return DataManager.load(USER_FILE, {})
 
 def save_user_settings(data):
-    save_json_file(USER_FILE, data)
+    DataManager.save(USER_FILE, data)
+
+
+def load_giveaway_data():
+    return load_json_file(GIVEAWAY_FILE, {})
+
+
+def save_giveaway_data(data):
+    save_json_file(GIVEAWAY_FILE, data)
+
+
+def parse_duration_to_seconds(value: str) -> int | None:
+    if not value:
+        return None
+
+    text = value.strip().lower()
+    if not re.fullmatch(r'(?:\d+[dhms]\s*)+', text):
+        return None
+
+    total_seconds = 0
+    for amount, unit in re.findall(r'(\d+)([dhms])', text):
+        amount = int(amount)
+        if unit == 'd':
+            total_seconds += amount * 86400
+        elif unit == 'h':
+            total_seconds += amount * 3600
+        elif unit == 'm':
+            total_seconds += amount * 60
+        else:
+            total_seconds += amount
+
+    return total_seconds
+
+
+def build_giveaway_embed(giveaway: dict) -> discord.Embed:
+    """Build embed for giveaway display."""
+    title = giveaway.get('name', 'Giveaway')
+    host_id = giveaway.get('host_id')
+    host_value = f"<@{host_id}>" if host_id else "Unknown"
+    entries = giveaway.get('entries', [])
+
+    reward_parts = []
+    if giveaway.get('role_id'):
+        role = bot.get_guild(int(giveaway['guild_id'])).get_role(int(giveaway['role_id'])) if bot.get_guild(int(giveaway['guild_id'])) else None
+        reward_parts.append(f"Role: {role.name if role else 'Unknown role'}")
+    if giveaway.get('temp_role_id'):
+        role = bot.get_guild(int(giveaway['guild_id'])).get_role(int(giveaway['temp_role_id'])) if bot.get_guild(int(giveaway['guild_id'])) else None
+        reward_parts.append(f"Temp role: {role.name if role else 'Unknown role'} ({giveaway.get('temp_role_time', 0)}m)")
+    if giveaway.get('item'):
+        reward_parts.append(f"Item: {giveaway['item']}")
+    if giveaway.get('money', 0):
+        reward_parts.append(f"Money: ${giveaway['money']}")
+    if giveaway.get('xp', 0):
+        reward_parts.append(f"XP: {giveaway['xp']}")
+
+    reward_text = "\n".join(reward_parts) if reward_parts else "No rewards"
+    
+    if giveaway.get('status') == 'ended':
+        embed = discord.Embed(title=f"<:present:1522648005650415658> {title}", description="Giveaway ended", color=discord.Color.red())
+    else:
+        embed = discord.Embed(title=f"<:present:1522648005650415658> {title}", description="━━━━━━━━━━━━━━", color=discord.Color.gold())
+
+    embed.add_field(name="Host", value=host_value, inline=True)
+    embed.add_field(name="Winners", value=str(giveaway.get('winners_count', 1)), inline=True)
+    embed.add_field(name="Entries", value=str(len(entries)), inline=False)
+    embed.add_field(name="Rewards", value=reward_text, inline=False)
+    embed.add_field(name="Ends", value=f"<t:{giveaway.get('end_time')}:R>", inline=False)
+    return embed
+
+
+class LeaveGiveawayConfirmView(View):
+    def __init__(self, giveaway_id: str, original_message, user_id: str):
+        super().__init__(timeout=60)
+        self.giveaway_id = giveaway_id
+        self.original_message = original_message
+        self.user_id = user_id
+
+    @discord.ui.button(label="Leave giveaway", style=discord.ButtonStyle.danger)
+    async def confirm_leave(self, interaction: discord.Interaction, button: Button):
+        data = load_giveaway_data()
+        giveaway = data.get(self.giveaway_id)
+        if not giveaway or giveaway.get('status') != 'active':
+            await interaction.response.send_message("This giveaway is no longer active.", ephemeral=True)
+            return
+
+        updated_entries = [entry for entry in giveaway.get('entries', []) if str(entry) != self.user_id]
+        giveaway['entries'] = updated_entries
+        data[self.giveaway_id] = giveaway
+        save_giveaway_data(data)
+
+        updated_view = GiveawayView(self.giveaway_id, giveaway)
+        try:
+            if self.original_message is not None:
+                await self.original_message.edit(view=updated_view)
+        except Exception:
+            pass
+
+        await interaction.response.send_message("You left the giveaway.", ephemeral=True)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary)
+    async def cancel_leave(self, interaction: discord.Interaction, button: Button):
+        await interaction.response.send_message("Okay, you stayed in the giveaway.", ephemeral=True)
+
+
+class GiveawayView(LayoutView):
+    def __init__(self, giveaway_id: str, giveaway: dict):
+        super().__init__(timeout=None)
+        self.giveaway_id = giveaway_id
+        self.giveaway = giveaway
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        giveaway = self.giveaway
+        entries = giveaway.get('entries', [])
+
+        entry_button = Button(
+            label="Join / Leave",
+            style=discord.ButtonStyle.success,
+            custom_id=f"giveaway_enter:{self.giveaway_id}",
+        )
+
+        async def on_enter(interaction: discord.Interaction):
+            await interaction.response.defer(ephemeral=True)
+
+            data = load_giveaway_data()
+            giveaway = data.get(self.giveaway_id)
+            if not giveaway or giveaway.get('status') != 'active':
+                await interaction.followup.send("This giveaway is no longer active.", ephemeral=True)
+                return
+
+            user_id = str(interaction.user.id)
+            normalized_entries = [str(entry) for entry in giveaway.get('entries', []) if entry]
+            if user_id in normalized_entries:
+                confirm_view = LeaveGiveawayConfirmView(self.giveaway_id, interaction.message, user_id)
+                await interaction.followup.send(
+                    "You are already entered in this giveaway. Do you want to leave it?",
+                    view=confirm_view,
+                    ephemeral=True,
+                )
+                return
+
+            normalized_entries.append(user_id)
+            giveaway['entries'] = normalized_entries
+            data[self.giveaway_id] = giveaway
+            save_giveaway_data(data)
+
+            updated_view = GiveawayView(self.giveaway_id, giveaway)
+            try:
+                await interaction.message.edit(view=updated_view)
+            except Exception:
+                pass
+
+            await interaction.followup.send("You joined the giveaway!", ephemeral=True)
+
+        entry_button.callback = on_enter
+
+        host_id = giveaway.get('host_id')
+        host_value = f"<@{host_id}>" if host_id else "Unknown"
+
+        reward_parts = []
+        if giveaway.get('role_id'):
+            role = bot.get_guild(int(giveaway['guild_id'])).get_role(int(giveaway['role_id'])) if bot.get_guild(int(giveaway['guild_id'])) else None
+            reward_parts.append(f"Role: {role.name if role else 'Unknown role'}")
+        if giveaway.get('temp_role_id'):
+            role = bot.get_guild(int(giveaway['guild_id'])).get_role(int(giveaway['temp_role_id'])) if bot.get_guild(int(giveaway['guild_id'])) else None
+            reward_parts.append(f"Temp role: {role.name if role else 'Unknown role'} ({giveaway.get('temp_role_time', 0)}m)")
+        if giveaway.get('item'):
+            reward_parts.append(f"Item: {giveaway['item']}")
+        if giveaway.get('money', 0):
+            reward_parts.append(f"Money: ${giveaway['money']}")
+        if giveaway.get('xp', 0):
+            reward_parts.append(f"XP: {giveaway['xp']}")
+
+        reward_text = "\n".join(reward_parts) if reward_parts else "No rewards"
+
+        container_items = [
+            TextDisplay(f"<:present:1522648005650415658> {giveaway['name']}"),
+            Separator(),
+            TextDisplay(f"**Host:** {host_value}\n**Winners:** {giveaway.get('winners_count', 1)}"),
+        ]
+
+        if giveaway.get('status') == 'active':
+            container_items.append(
+                Section(
+                    f"**Entries:** {len(entries)}",
+                    accessory=entry_button,
+                )
+            )
+        else:
+            container_items.append(TextDisplay(f"**Entries:** {len(entries)}"))
+
+        container_items.extend([
+            Separator(),
+            TextDisplay(f"**Rewards:**\n{reward_text}"),
+            Separator(),
+            TextDisplay(f"**Ends:** <t:{giveaway.get('end_time')}:R>"),
+        ])
+
+        container = Container(
+            *container_items,
+            accent_color=discord.Color.gold() if giveaway.get('status') == 'active' else discord.Color.red(),
+        )
+        self.add_item(container)
+
+
+async def finalize_giveaway(giveaway_id: str, giveaway: dict):
+    guild = bot.get_guild(int(giveaway['guild_id'])) if giveaway.get('guild_id') else None
+    entries = [entry for entry in giveaway.get('entries', []) if entry]
+    winners = []
+    if entries:
+        winner_count = max(1, int(giveaway.get('winners_count', 1)))
+        winners = random.sample(entries, k=min(winner_count, len(entries)))
+
+    channel = bot.get_channel(int(giveaway['channel_id'])) if giveaway.get('channel_id') else None
+    if channel and giveaway.get('message_id'):
+        try:
+            message = await channel.fetch_message(int(giveaway['message_id']))
+            giveaway['status'] = 'ended'
+            view = GiveawayView(giveaway_id, giveaway)
+            await message.edit(view=view)
+        except Exception:
+            pass
+
+    winner_references = []
+    if guild:
+        role = guild.get_role(int(giveaway['role_id'])) if giveaway.get('role_id') else None
+        temp_role = guild.get_role(int(giveaway['temp_role_id'])) if giveaway.get('temp_role_id') else None
+
+        for winner_id in winners:
+            member = guild.get_member(int(winner_id))
+            if member:
+                winner_references.append(format_user_reference(member))
+            if role and member:
+                try:
+                    await member.add_roles(role, reason=f"Giveaway winner for {giveaway['name']}")
+                except Exception:
+                    pass
+            if temp_role and member and giveaway.get('temp_role_time', 0) > 0:
+                try:
+                    await member.add_roles(temp_role, reason=f"Temporary giveaway role for {giveaway['name']}")
+                    async def remove_temp_role():
+                        await asyncio.sleep(int(giveaway['temp_role_time']) * 60)
+                        try:
+                            await member.remove_roles(temp_role, reason="Temporary giveaway role expired")
+                        except Exception:
+                            pass
+                    asyncio.create_task(remove_temp_role())
+                except Exception:
+                    pass
+
+            if giveaway.get('money', 0) or giveaway.get('xp', 0) or giveaway.get('item'):
+                if giveaway.get('money', 0) or giveaway.get('item'):
+                    economy_data = load_data()
+                    guild_data = economy_data.setdefault(str(guild.id), {})
+                    users = guild_data.setdefault('users', {})
+                    user_data = users.setdefault(str(winner_id), {"balance": 0, "inventory": {}})
+                    user_data.setdefault("inventory", {})
+                    if giveaway.get('money', 0):
+                        user_data['balance'] = user_data.get('balance', 0) + int(giveaway['money'])
+                    if giveaway.get('item'):
+                        inventory_add(user_data['inventory'], giveaway['item'], 1)
+                    save_data(economy_data)
+                if giveaway.get('xp', 0) and member:
+                    await add_xp(member, guild, int(giveaway['xp']), announce_channel=channel)
+
+            try:
+                user = await bot.fetch_user(int(winner_id))
+                if user:
+                    dm_embed = discord.Embed(
+                        title="<:spark:1517583248421552305> Giveaway Win!",
+                        description=f"You won the giveaway **{giveaway['name']}** in **{guild.name}**.",
+                        color=discord.Color.green(),
+                    )
+                    if role:
+                        dm_embed.add_field(name="<:bell:1517497562184024275> Role", value=role.name, inline=True)
+                    if temp_role:
+                        dm_embed.add_field(name="<:timer:1517996239583576194> Temp Role", value=f"{temp_role.name} ({giveaway.get('temp_role_time', 0)}m)", inline=True)
+                    if giveaway.get('money', 0):
+                        dm_embed.add_field(name="<:money:1517580310395486239> Money", value=f"${giveaway['money']}", inline=True)
+                    if giveaway.get('xp', 0):
+                        dm_embed.add_field(name="<:Vial:1517681553377857628> XP", value=str(giveaway['xp']), inline=True)
+                    if giveaway.get('item'):
+                        dm_embed.add_field(name="<:box:1517581439552585759> Item", value=giveaway['item'], inline=True)
+                    await user.send(embed=dm_embed)
+            except Exception:
+                pass
+
+    if channel:
+        if winners:
+            winner_text = ", ".join(winner_references) if winner_references else "unknown winners"
+            await channel.send(f"<:spark:1517583248421552305> Giveaway **{giveaway['name']}** has ended! Winners: {winner_text}")
+        else:
+            await channel.send(f"<:spark:1517583248421552305> Giveaway **{giveaway['name']}** has ended with no entries.")
+
+    data = load_giveaway_data()
+    if giveaway_id in data:
+        del data[giveaway_id]
+        save_giveaway_data(data)
+
+
+@tasks.loop(minutes=1)
+async def giveaway_loop():
+    data = load_giveaway_data()
+    if not data:
+        return
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    for giveaway_id, giveaway in list(data.items()):
+        if giveaway.get('status') != 'active':
+            continue
+        if int(giveaway.get('end_time', 0)) <= now:
+            await finalize_giveaway(giveaway_id, giveaway)
+
+
+@tasks.loop(seconds=30)
+async def giveaway_refresh_loop():
+    data = load_giveaway_data()
+    if not data:
+        return
+
+    for giveaway_id, giveaway in list(data.items()):
+        if giveaway.get('status') != 'active':
+            continue
+
+        channel = bot.get_channel(int(giveaway['channel_id'])) if giveaway.get('channel_id') else None
+        if not channel or not giveaway.get('message_id'):
+            continue
+
+        try:
+            message = await channel.fetch_message(int(giveaway['message_id']))
+            await message.edit(view=GiveawayView(giveaway_id, giveaway))
+        except Exception:
+            pass
+
+
+@giveaway_loop.before_loop
+async def before_giveaway_loop():
+    await bot.wait_until_ready()
 
 
 def get_user_settings_entry(settings: dict, user_id: str) -> dict:
@@ -654,15 +994,8 @@ def get_user_has_leveled_up_before(user_id: str) -> bool:
     if "has_leveled_up_before" in user_settings:
         return bool(user_settings["has_leveled_up_before"])
 
-    levels_data = load_levels()
-    for guild_data in levels_data.values():
-        users = guild_data.get("users", {})
-        user_data = users.get(str(user_id))
-        if isinstance(user_data, dict) and user_data.get("level", 0) > 0:
-            user_settings["has_leveled_up_before"] = True
-            save_user_settings(settings)
-            return True
-
+    user_settings["has_leveled_up_before"] = False
+    save_user_settings(settings)
     return False
 
 
@@ -791,45 +1124,28 @@ def close_local_rpc():
 
 
 def load_love_data():
-    if not os.path.exists(RATE_FILE):
-        save_json_file(RATE_FILE, {})
-        return {}
-    return load_json_file(RATE_FILE, {})
-
+    return DataManager.load(RATE_FILE, {})
 
 def save_love_data(data):
-    save_json_file(RATE_FILE, data)
-
+    DataManager.save(RATE_FILE, data)
 
 def load_fun_data():
-    if not os.path.exists(FUN_FILE):
-        return {}
-    with open(FUN_FILE, 'r') as f:
-        try:
-            return json.load(f)
-        except json.JSONDecodeError:
-            return {}
-
+    return DataManager.load(FUN_FILE, {})
 
 def save_fun_data(data):
-    with open(FUN_FILE, 'w') as f:
-        json.dump(data, f, indent=4)
-
+    DataManager.save(FUN_FILE, data)
 
 def load_board_data():
-    return load_json_file(BOARD_FILE, {})
-
+    return DataManager.load(BOARD_FILE, {})
 
 def save_board_data(data):
-    save_json_file(BOARD_FILE, data)
-
+    DataManager.save(BOARD_FILE, data)
 
 def load_guild_data():
-    return load_json_file(GUILD_FILE, {})
-
+    return DataManager.load(GUILD_FILE, {})
 
 def save_guild_data(data):
-    save_json_file(GUILD_FILE, data)
+    DataManager.save(GUILD_FILE, data)
 
 
 def load_lock_config():
@@ -856,7 +1172,9 @@ def get_guild_config(guild_id: str) -> dict:
         "ghost_ping_enabled": False,
         "edit_delete_history_enabled": True,
         "level_up_message_enabled": False,
-        "counter_channels": {}
+        "counter_channels": {},
+        "honeypot_channel_id": None,
+        "honeypot_sanction": {}
     }
 
     if guild_id not in data:
@@ -867,6 +1185,299 @@ def get_guild_config(guild_id: str) -> dict:
                 data[guild_id][key] = value
     save_guild_data(data)
     return data[guild_id], data
+
+
+def get_guild_warnings(guild_id: str, member_id: int):
+    data = load_guild_data()
+    guild = data.setdefault(guild_id, {})
+    warnings = guild.setdefault("warnings", {})
+    user_warnings = warnings.setdefault(str(member_id), [])
+    return user_warnings, data
+
+
+def get_guild_automod_config(guild_id: str) -> tuple[dict, dict]:
+    data = load_guild_data()
+    guild = data.setdefault(guild_id, {})
+    automod = guild.setdefault("automod", {})
+    automod.setdefault("blocked_words", [])
+    automod.setdefault("warning_sanctions", [])
+    automod.setdefault("warning_sanction_state", {})
+    automod.setdefault("blocked_rule_id", None)
+
+    legacy_auto_sanctions = guild.pop("auto_sanctions", None)
+    if isinstance(legacy_auto_sanctions, dict):
+        migrated = []
+        for warns_str, sanction in legacy_auto_sanctions.items():
+            try:
+                warns = int(warns_str)
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(sanction, dict):
+                continue
+            migrated.append({
+                "warns": warns,
+                "action": str(sanction.get("action", "timeout")),
+                "duration_seconds": int(sanction.get("duration_seconds", sanction.get("duration_seconds", 0) or 0)),
+                "duration": str(sanction.get("duration", "")) or str(sanction.get("duration_seconds", "")),
+            })
+        if migrated:
+            automod.setdefault("warning_sanctions", []).extend(migrated)
+            save_guild_data(data)
+
+    return automod, data
+
+
+def parse_bool_value(value: str) -> bool:
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def automod_text_matches(content: str, phrase: str, use_regex: bool = False) -> bool:
+    if not content or not phrase:
+        return False
+    if use_regex:
+        try:
+            return re.search(phrase, content, re.IGNORECASE) is not None
+        except re.error:
+            return False
+    return phrase.lower() in content.lower()
+
+
+async def sync_guild_word_block_rule(guild_id: str) -> None:
+    guild = bot.get_guild(int(guild_id)) if guild_id.isdigit() else None
+    if guild is None:
+        return
+
+    automod, data = get_guild_automod_config(guild_id)
+    blocked_words = automod.get("blocked_words", [])
+    keyword_filter = [entry.get("phrase", "").strip() for entry in blocked_words if not entry.get("use_regex", False) and entry.get("phrase", "").strip()]
+    regex_patterns = [entry.get("phrase", "").strip() for entry in blocked_words if entry.get("use_regex", False) and entry.get("phrase", "").strip()]
+
+    try:
+        existing_rules = await guild.fetch_automod_rules()
+        existing_rule = next((rule for rule in existing_rules if rule.name == "Word Block"), None)
+
+        if not keyword_filter and not regex_patterns:
+            if existing_rule is not None:
+                await existing_rule.delete(reason="No blocked words configured")
+                automod.pop("blocked_rule_id", None)
+                save_guild_data(data)
+            return
+
+        trigger = AutoModTrigger(
+            type=AutoModRuleTriggerType.keyword,
+            keyword_filter=keyword_filter or None,
+            regex_patterns=regex_patterns or None,
+        )
+        action = AutoModRuleAction(
+            type=AutoModRuleActionType.block_message,
+            custom_message="Blocked word or phrase detected.",
+        )
+
+        if existing_rule is not None:
+            await existing_rule.edit(
+                name="Word Block",
+                event_type=AutoModRuleEventType.message_send,
+                trigger=trigger,
+                actions=[action],
+                enabled=True,
+                reason="Updated blocked word settings",
+            )
+            automod["blocked_rule_id"] = existing_rule.id
+            save_guild_data(data)
+        else:
+            new_rule = await guild.create_automod_rule(
+                name="Word Block",
+                event_type=AutoModRuleEventType.message_send,
+                trigger=trigger,
+                actions=[action],
+                enabled=True,
+                reason="Configured blocked word settings",
+            )
+            automod["blocked_rule_id"] = new_rule.id
+            save_guild_data(data)
+    except Exception:
+        pass
+
+
+async def add_guild_warning(guild_id: str, member_id: int, reason: str, moderator_id: int | None = None, moderator_name: str | None = None) -> tuple[list[dict], dict]:
+    user_warnings, data = get_guild_warnings(guild_id, member_id)
+    warn_entry = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "reason": reason,
+        "moderator_id": moderator_id,
+        "moderator_name": moderator_name,
+    }
+    user_warnings.append(warn_entry)
+    save_guild_data(data)
+    return user_warnings, data
+
+
+async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: str, total_warnings: int | None = None, automod_triggered: bool = False) -> None:
+    if member.bot:
+        return
+
+    title = "<:warning:1517452174991556758> You have received a warning"
+    description = f"**Server:** {guild.name}\n**Reason:** {reason}"
+    if automod_triggered:
+        description += "\n**Triggered by:** Discord AutoMod"
+    if total_warnings is not None:
+        description += f"\n**Total warnings:** {total_warnings}"
+
+    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    try:
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def apply_warning_sanctions(member: discord.Member, guild: discord.Guild, total_warnings: int) -> None:
+    automod, data = get_guild_automod_config(str(guild.id))
+    sanction_state = automod.setdefault("warning_sanction_state", {})
+    member_key = str(member.id)
+    last_applied = int(sanction_state.get(member_key, {}).get("last_applied_warns", 0))
+    if total_warnings <= last_applied:
+        return
+
+    applicable = [
+        rule for rule in automod.get("warning_sanctions", [])
+        if isinstance(rule, dict) and int(rule.get("warns", 0)) <= total_warnings
+    ]
+    if not applicable:
+        return
+
+    rule = max(applicable, key=lambda rule: int(rule.get("warns", 0)))
+    threshold = int(rule.get("warns", 0))
+    action = str(rule.get("action", "timeout")).lower()
+    try:
+        if action == "timeout":
+            duration_seconds = max(1, int(rule.get("duration_seconds", 86400)))
+            timed_out_until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+            await member.edit(timed_out_until=timed_out_until, reason=f"Reached {threshold} warnings")
+        elif action == "kick":
+            await member.kick(reason=f"Reached {threshold} warnings")
+        elif action == "ban":
+            await member.ban(reason=f"Reached {threshold} warnings")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    sanction_state[member_key] = {"last_applied_warns": total_warnings}
+    save_guild_data(data)
+
+
+async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: discord.Guild, channel: discord.abc.GuildChannel, message_content: str | None = None) -> bool:
+    if member.bot or not guild or not isinstance(member, discord.Member):
+        return False
+
+    guild_config, _ = get_guild_config(str(guild.id))
+    configured_channel_id = guild_config.get("honeypot_channel_id")
+    if not configured_channel_id or int(configured_channel_id) != channel.id:
+        return False
+
+    sanction = guild_config.get("honeypot_sanction") or {}
+    action = str(sanction.get("action", "timeout")).lower()
+    if action not in {"timeout", "kick", "ban"}:
+        return False
+
+    content_preview = (message_content or "").strip()
+    if not content_preview:
+        content_preview = "[no text content]"
+    if len(content_preview) > 500:
+        content_preview = content_preview[:497] + "..."
+
+    for log_id in get_guild_admin_log_channel_ids(guild):
+        log_channel = guild.get_channel(log_id)
+        if log_channel is None:
+            continue
+        try:
+            await log_channel.send(
+                f"**[HONEYPOT]** `{member.display_name}`: {content_preview}\n-# <:honey:1524116282075512842> **Honeypot triggered** by {member.mention} | Action: {action.title()}"
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    try:
+        if action == "timeout":
+            duration_seconds = max(1, int(sanction.get("duration_seconds", 86400)))
+            timed_out_until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
+            await member.edit(timed_out_until=timed_out_until, reason="Sent a message in the honeypot channel")
+        elif action == "kick":
+            await member.kick(reason="Sent a message in the honeypot channel")
+        elif action == "ban":
+            await member.ban(reason="Sent a message in the honeypot channel")
+    except (discord.Forbidden, discord.HTTPException):
+        return False
+
+    return True
+
+
+@bot.event
+async def on_automod_action(action: discord.AutoModAction) -> None:
+    guild = action.guild
+    if guild is None:
+        return
+
+    automod, data = get_guild_automod_config(str(guild.id))
+    blocked_rule_id = automod.get("blocked_rule_id")
+
+    if blocked_rule_id is None or action.rule_id != blocked_rule_id:
+        resolved_id = None
+        try:
+            rule = await action.fetch_rule()
+            if rule.name == "Word Block":
+                resolved_id = action.rule_id
+        except Exception:
+            try:
+                rules = await guild.fetch_automod_rules()
+                matching = next((r for r in rules if r.id == action.rule_id and r.name == "Word Block"), None)
+                if matching is not None:
+                    resolved_id = action.rule_id
+            except Exception:
+                resolved_id = None
+
+        if resolved_id is None:
+
+            blocked_rule_id = None
+        else:
+            blocked_rule_id = resolved_id
+            automod["blocked_rule_id"] = resolved_id
+            save_guild_data(data)
+
+    text = action.matched_content or action.matched_keyword or action.content or ""
+    if not text:
+        return
+
+    blocked_words = automod.get("blocked_words", [])
+    should_warn = False
+    for entry in blocked_words:
+        if not entry.get("warn_on_match", False):
+            continue
+        phrase = str(entry.get("phrase", "")).strip()
+        if not phrase:
+            continue
+        if automod_text_matches(text, phrase, bool(entry.get("use_regex", False))):
+            should_warn = True
+            break
+
+    if not should_warn:
+        return
+
+    member_id = action.user_id
+    warnings, _ = await add_guild_warning(str(guild.id), member_id, f"Discord AutoMod blocked a message via rule {action.rule_id}", moderator_id=None, moderator_name="Discord AutoMod")
+
+    member = action.member or guild.get_member(member_id)
+    if member is None:
+        try:
+            member = await guild.fetch_member(member_id)
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            member = None
+
+    if member is not None and not member.bot:
+        await send_warning_dm(member, guild, f"Discord AutoMod blocked a message via rule {action.rule_id}", total_warnings=len(warnings), automod_triggered=True)
+        await apply_warning_sanctions(member, guild, len(warnings))
+
+    if member is None:
+        return
 
 
 def format_channel_reference(guild: discord.Guild, channel_id) -> str:
@@ -913,11 +1524,28 @@ async def safe_send(interaction: discord.Interaction, content: str, **kwargs):
 
 
 def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
-    return [cid for cid in admin_log_channels if guild.get_channel(cid) is not None]
-
+    """Get valid admin log channel IDs for this guild"""
+    return _get_guild_channel_ids(guild, admin_log_channels)
 
 def get_guild_locked_channel_ids(guild: discord.Guild) -> list[int]:
-    return [cid for cid in locked_channels if guild.get_channel(cid) is not None]
+    """Get valid locked channel IDs for this guild"""
+    return _get_guild_channel_ids(guild, locked_channels)
+
+def _get_guild_channel_ids(guild: discord.Guild, channel_dict: dict) -> list[int]:
+    """Generic helper to get valid channel IDs from a dictionary"""
+    return [cid for cid in channel_dict if guild.get_channel(cid) is not None]
+
+def get_admin_log_channel_mentions(guild: discord.Guild) -> list[str]:
+    """Get mentions for admin log channels"""
+    return _get_channel_mentions(guild, admin_log_channels)
+
+def get_locked_channel_mentions(guild: discord.Guild) -> list[str]:
+    """Get mentions for locked channels"""
+    return _get_channel_mentions(guild, locked_channels)
+
+def _get_channel_mentions(guild: discord.Guild, channel_dict: dict) -> list[str]:
+    """Generic helper to get channel mentions from a dictionary"""
+    return [guild.get_channel(cid).mention for cid in channel_dict if guild.get_channel(cid) is not None]
 
 
 def get_guild_board_entries(guild_id: str) -> list[str]:
@@ -970,14 +1598,6 @@ def ensure_board_guild_config(guild_id: str):
     if guild_id not in board_data:
         board_data[guild_id] = {}
     return board_data
-
-
-def get_admin_log_channel_mentions(guild: discord.Guild) -> list[str]:
-    return [guild.get_channel(cid).mention for cid in admin_log_channels if guild.get_channel(cid) is not None]
-
-
-def get_locked_channel_mentions(guild: discord.Guild) -> list[str]:
-    return [guild.get_channel(cid).mention for cid in locked_channels if guild.get_channel(cid) is not None]
 
 
 def parse_bool_value(value: str) -> bool:
@@ -1213,20 +1833,28 @@ def trim_cache(cache: list, max_len: int = 10) -> list:
     return cache[-max_len:]
 
 
-def add_bot_error(interaction: discord.Interaction, error: Exception):
+def add_bot_error(guild_id: int | None, channel_id: int | None, user, command_name: str, error: Exception, interaction: discord.Interaction = None):
+    """Unified error logging. If interaction is provided, extracts guild/channel/user/command from it."""
     global bot_error_cache
 
-    if interaction.guild is None:
+
+    if interaction is not None:
+        if interaction.guild is None:
+            return
+        guild_id = interaction.guild.id
+        channel_id = interaction.channel_id
+        user = interaction.user
+        command_name = getattr(getattr(interaction, "command", None), "qualified_name", None)
+        if not command_name:
+            command_name = getattr(getattr(interaction, "command", None), "name", "unknown command")
+
+    if guild_id is None:
         return
 
-    command_name = getattr(getattr(interaction, "command", None), "qualified_name", None)
-    if not command_name:
-        command_name = getattr(getattr(interaction, "command", None), "name", "unknown command")
-
     bot_error_cache.append({
-        "guild_id": interaction.guild.id,
-        "channel_id": interaction.channel_id,
-        "user": interaction.user,
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "user": user,
         "command_name": command_name,
         "error_type": type(error).__name__,
         "error_message": str(error) or "No error message provided",
@@ -1238,23 +1866,8 @@ def add_bot_error(interaction: discord.Interaction, error: Exception):
 
 
 def add_bot_error_entry(guild_id: int | None, channel_id: int | None, user, source: str, error: Exception):
-    global bot_error_cache
-
-    if guild_id is None:
-        return
-
-    bot_error_cache.append({
-        "guild_id": guild_id,
-        "channel_id": channel_id,
-        "user": user,
-        "command_name": source,
-        "error_type": type(error).__name__,
-        "error_message": str(error) or "No error message provided",
-        "time": datetime.now(timezone.utc),
-    })
-
-    if len(bot_error_cache) > 10:
-        bot_error_cache = bot_error_cache[-10:]
+    """Backwards compatibility wrapper for add_bot_error"""
+    add_bot_error(guild_id, channel_id, user, source, error)
 
 
 def normalize_item(name: str) -> str:
@@ -1627,6 +2240,10 @@ async def on_ready():
         update_presence.start()
     if not voice_xp_tracker.is_running():
         voice_xp_tracker.start()
+    if not giveaway_loop.is_running():
+        giveaway_loop.start()
+    if not giveaway_refresh_loop.is_running():
+        giveaway_refresh_loop.start()
     bot.loop.create_task(blacklist_startup_cleanup())
 
 
@@ -1634,6 +2251,14 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
+
+    if message.guild:
+        if await apply_honeypot_sanction(message.author, message.guild, message.channel, message.content):
+            try:
+                await message.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+            return
 
     if message.guild and message.channel.id in locked_channels:
         guild_id = message.guild.id
@@ -2021,8 +2646,15 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
         else:
             await interaction.response.send_message(message_text, ephemeral=True)
     else:
-        add_bot_error(interaction, original_error)
         command_name = getattr(getattr(interaction, "command", None), "qualified_name", None) or getattr(getattr(interaction, "command", None), "name", "unknown command")
+        add_bot_error(
+            getattr(interaction, "guild_id", None),
+            getattr(interaction, "channel_id", None),
+            getattr(interaction, "user", None),
+            command_name,
+            original_error,
+            interaction=interaction,
+        )
         print(f"Ignored exception in command tree [{command_name}]: {type(original_error).__name__}: {original_error}")
         print("".join(traceback.format_exception(type(original_error), original_error, original_error.__traceback__)))
         if not interaction.response.is_done():
@@ -2061,7 +2693,7 @@ async def update_presence():
     VERSION_ALTERNATE = os.getenv('BOT_VERSION_ALTERNATE')
     ACTIVITY_TEXT = os.getenv('ACTIVITY')
 
-    # cycle between three presence messages
+
     online_users = sum(
         len([m for m in guild.members if m.status != discord.Status.offline and not m.bot])
         for guild in bot.guilds
@@ -2527,7 +3159,7 @@ async def channelinfo(interaction: discord.Interaction):
             ch_id = cfg.get("channel_id")
             required = cfg.get("required_count") or cfg.get("required") or cfg.get("required_count", None)
             channel_repr = fmt_channel(ch_id)
-            # prefer to show emoji (emoji_key) and required count
+
             req_text = f"required {required}" if required is not None else "required ?"
             board_entries.append(f"{emoji_key} in {channel_repr} ({req_text})")
     board_channels = "\n".join(board_entries) if board_entries else "None"
@@ -2856,7 +3488,16 @@ async def stats(interaction: discord.Interaction):
     total_shards = len(bot.shards) or 1
     shard_info = f"Shard id: {guild_shard_id} | total: {total_shards}"
     embed.add_field(name="<:shard:1518376149741338744> Shard Info", value=shard_info, inline=True)
-    embed.add_field(name="<:nUtils:1518376146008539146> Bot owner", value="-ImNinnn- (imninnn.)", inline=True)
+
+    app_info = await bot.application_info()
+    if app_info.team:
+        owner_value = app_info.team.name
+    elif app_info.owner:
+        owner_value = f"{app_info.owner.name}#{app_info.owner.discriminator}"
+    else:
+        owner_value = "Unknown"
+
+    embed.add_field(name="<:nUtils:1518376146008539146> Bot owner", value=owner_value, inline=True)
     await interaction.response.send_message(embed=embed)
 
 
@@ -2941,7 +3582,8 @@ async def emoji(interaction: discord.Interaction, emoji: str):
 
 
 
-@bot.tree.command(name="adm-voice-move", description="Move everyone in your current voice channel to another voice channel")
+
+@bot.tree.command(name="voice-move_adm", description="Move everyone in your current voice channel to another voice channel")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(move_members=True)
 @app_commands.describe(
@@ -2984,7 +3626,7 @@ async def adm_voice_move(interaction: discord.Interaction, channel: discord.Voic
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="adm-rename", description="Rename a user or reset their nickname")
+@bot.tree.command(name="rename_adm", description="Rename a user or reset their nickname")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_nicknames=True)
 @app_commands.describe(
@@ -3008,7 +3650,7 @@ async def rename(interaction: discord.Interaction, user: discord.Member, name: s
         await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="adm-purge-nuke", description="Fully clear a channel")
+@bot.tree.command(name="purge-nuke_adm", description="Fully clear a channel")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_channels=True)
 async def nuke(interaction: discord.Interaction, archive: bool = False):
@@ -3054,7 +3696,7 @@ async def nuke(interaction: discord.Interaction, archive: bool = False):
         print(f"Error during nuke cleanup: {e}")
 
 
-@bot.tree.command(name="adm-purge", description="Mass delete messages from the channel")
+@bot.tree.command(name="purge_adm", description="Mass delete messages from the channel")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_messages=True)
 @app_commands.describe(
@@ -3082,18 +3724,47 @@ async def purge(interaction: discord.Interaction, amount: int, user: discord.Mem
         await interaction.followup.send(f"<:disapprove:1517452151012589662> Failed to purge messages. Error: {e}", ephemeral=True)
 
 
-@bot.tree.command(name="adm-timeout", description="Timeout a member for a specific duration")
+def resolve_member_from_input(guild: discord.Guild, member_input: str | discord.Member | discord.User | None) -> discord.Member | None:
+    if not guild:
+        return None
+
+    if isinstance(member_input, discord.Member):
+        return member_input
+
+    if isinstance(member_input, discord.User):
+        return guild.get_member(member_input.id)
+
+    if not member_input:
+        return None
+
+    value = str(member_input).strip()
+    if not value:
+        return None
+
+    if value.startswith("<@") and value.endswith(">"):
+        value = value[2:-1].lstrip("!")
+
+    if value.isdigit():
+        return guild.get_member(int(value))
+
+    return guild.get_member_named(value) or discord.utils.find(
+        lambda member: member.name.lower() == value.lower() or member.display_name.lower() == value.lower(),
+        guild.members,
+    )
+
+
+@bot.tree.command(name="timeout_adm", description="Timeout a member for a specific duration")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(moderate_members=True)
 @app_commands.describe(
-    member="The member to timeout",
+    member="The username, mention, or ID of the member to timeout",
     days="Number of days",
     hours="Number of hours",
     minutes="Number of minutes",
     seconds="Number of seconds",
     reason="Why is this user being timed out?"
 )
-async def timeout(interaction: discord.Interaction, member: discord.Member, days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0, reason: str = "No reason provided"):
+async def timeout(interaction: discord.Interaction, member: discord.Member | None = None, days: int = 0, hours: int = 0, minutes: int = 0, seconds: int = 0, reason: str = "No reason provided"):
     duration = timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
     if duration.total_seconds() <= 0:
         await interaction.response.send_message("<:disapprove:1517452151012589662> You must specify a duration greater than 0!", ephemeral=True)
@@ -3102,27 +3773,36 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, days
         await interaction.response.send_message("<:disapprove:1517452151012589662> Timeout cannot exceed 28 days.", ephemeral=True)
         return
 
-    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != member and member.top_role >= interaction.user.top_role:
+    target_member = resolve_member_from_input(interaction.guild, member)
+    if target_member is None:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I couldn't find that user in this server.", ephemeral=True)
+        return
+
+    if target_member == interaction.user:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot timeout yourself.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != target_member and target_member.top_role >= interaction.user.top_role:
         await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot timeout someone with an equal or higher role than yours.", ephemeral=True)
         return
 
     time_str = f"{days}d {hours}h {minutes}m {seconds}s"
-    if not member.bot:
+    if not target_member.bot:
         try:
             dm_embed = discord.Embed(
                 title="<:hourglass:1517574046252924938> You have been timed out",
                 description=f"**Server:** {interaction.guild.name}\n**Duration:** {time_str}\n**Reason:** {reason}",
                 color=discord.Color.orange()
             )
-            await member.send(embed=dm_embed)
+            await target_member.send(embed=dm_embed)
         except (discord.Forbidden, discord.HTTPException):
             pass
 
     try:
-        await member.timeout(duration, reason=reason)
+        await target_member.timeout(duration, reason=reason)
         confirm_embed = discord.Embed(
             title="<:approve:1517452125687513158> User Timed Out",
-            description=f"**{format_user_reference(member)}** has been timed out for {time_str}.",
+            description=f"**{format_user_reference(target_member)}** has been timed out for {time_str}.",
             color=discord.Color.green()
         )
         confirm_embed.add_field(name="Reason", value=reason)
@@ -3133,6 +3813,729 @@ async def timeout(interaction: discord.Interaction, member: discord.Member, days
         await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
 
 
+@bot.tree.command(name="kick_adm", description="Kick a member from the server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(kick_members=True)
+@app_commands.describe(
+    member="The username, mention, or ID of the member to kick",
+    reason="Why is this user being kicked?"
+)
+async def kick(interaction: discord.Interaction, member: discord.Member | None = None, reason: str = "No reason provided"):
+    target_member = resolve_member_from_input(interaction.guild, member)
+    if target_member is None:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I couldn't find that user in this server.", ephemeral=True)
+        return
+
+    if target_member == interaction.user:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot kick yourself.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != target_member and target_member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot kick someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    if not target_member.bot:
+        try:
+            dm_embed = discord.Embed(
+                title="<:warning:1517452174991556758> You have been kicked",
+                description=f"**Server:** {interaction.guild.name}\n**Reason:** {reason}",
+                color=discord.Color.orange()
+            )
+            await target_member.send(embed=dm_embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    try:
+        await target_member.kick(reason=reason)
+        confirm_embed = discord.Embed(
+            title="<:approuve:1517452125687513158> User Kicked",
+            description=f"**{format_user_reference(target_member)}** has been kicked from the server.",
+            color=discord.Color.green()
+        )
+        confirm_embed.add_field(name="Reason", value=reason)
+        await interaction.response.send_message(embed=confirm_embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to kick this user (Hierarchy issue).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="ban_adm", description="Ban a member from the server")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(ban_members=True)
+@app_commands.describe(
+    member="The username, mention, or ID of the member to ban",
+    reason="Why is this user being banned?",
+    delete_days="How many days of recent messages to delete (0-7)"
+)
+async def ban(interaction: discord.Interaction, member: discord.Member | None = None, reason: str = "No reason provided", delete_days: int = 0):
+    if delete_days < 0 or delete_days > 7:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Delete days must be between 0 and 7.", ephemeral=True)
+        return
+
+    target_member = resolve_member_from_input(interaction.guild, member)
+    if target_member is None:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I couldn't find that user in this server.", ephemeral=True)
+        return
+
+    if target_member == interaction.user:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot ban yourself.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != target_member and target_member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot ban someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    if not target_member.bot:
+        try:
+            dm_embed = discord.Embed(
+                title="<:dissaprouve:1517452151012589662> You have been banned",
+                description=f"**Server:** {interaction.guild.name}\n**Reason:** {reason}",
+                color=discord.Color.red()
+            )
+            await target_member.send(embed=dm_embed)
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    try:
+        await target_member.ban(reason=reason, delete_message_days=delete_days)
+        confirm_embed = discord.Embed(
+            title="<:approuve:1517452125687513158> User Banned",
+            description=f"**{format_user_reference(target_member)}** has been banned from the server.",
+            color=discord.Color.green()
+        )
+        confirm_embed.add_field(name="Reason", value=reason)
+        if delete_days > 0:
+            confirm_embed.add_field(name="Deleted Messages", value=f"{delete_days} day(s)", inline=True)
+        await interaction.response.send_message(embed=confirm_embed)
+    except discord.Forbidden:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to ban this user (Hierarchy issue).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="warn_adm", description="Add or remove a warning for a user")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.describe(
+    member="The user to warn or remove a warning from",
+    action="Whether to add or remove the warning",
+    reason="The warning reason or removal note"
+)
+@app_commands.choices(action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove"), app_commands.Choice(name="Clear", value="clear")])
+async def warn_adm(
+    interaction: discord.Interaction,
+    member: discord.Member,
+    action: str,
+    reason: str = "No reason provided"
+):
+    if member == interaction.user:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot warn yourself.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot manage warnings for someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    user_warnings, data = get_guild_warnings(str(interaction.guild.id), member.id)
+
+    if action == "add":
+        warnings, data = await add_guild_warning(
+            str(interaction.guild.id),
+            member.id,
+            reason,
+            moderator_id=interaction.user.id,
+            moderator_name=str(interaction.user),
+        )
+
+        if not member.bot:
+            await send_warning_dm(member, interaction.guild, reason, total_warnings=len(warnings))
+
+        total = len(warnings)
+        await apply_warning_sanctions(member, interaction.guild, total)
+        confirm_embed = discord.Embed(
+            title="<:warning:1517452174991556758> Warning added",
+            description=f"**{format_user_reference(member)}** has been warned.",
+            color=discord.Color.orange()
+        )
+        confirm_embed.add_field(name="Reason", value=reason, inline=False)
+        confirm_embed.add_field(name="Total warnings", value=str(total), inline=True)
+        await interaction.response.send_message(embed=confirm_embed)
+        return
+
+    if action == "remove":
+        if not user_warnings:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> **{format_user_reference(member)}** has no warnings to remove.", ephemeral=True)
+            return
+
+        removed = user_warnings.pop()
+        save_guild_data(data)
+
+        automod, automod_data = get_guild_automod_config(str(interaction.guild.id))
+        sanction_state = automod.setdefault("warning_sanction_state", {})
+        sanction_state[str(member.id)] = {"last_applied_warns": len(user_warnings)}
+        save_guild_data(automod_data)
+
+        if not member.bot:
+            try:
+                dm_embed = discord.Embed(
+                    title="<:warning:1517452174991556758> A warning has been removed",
+                    description=f"**Server:** {interaction.guild.name}\n**Note:** {reason}",
+                    color=discord.Color.green()
+                )
+                await member.send(embed=dm_embed)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        total = len(user_warnings)
+        confirm_embed = discord.Embed(
+            title="<:warning:1517452174991556758> Warning removed",
+            description=f"A warning has been removed from **{format_user_reference(member)}**.",
+            color=discord.Color.green()
+        )
+        confirm_embed.add_field(name="Removed warning reason", value=removed.get("reason", "No reason provided"), inline=False)
+        confirm_embed.add_field(name="Note", value=reason, inline=False)
+        confirm_embed.add_field(name="Remaining warnings", value=str(total), inline=True)
+        await interaction.response.send_message(embed=confirm_embed)
+        return
+
+    if action == "clear":
+        if not user_warnings:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> **{format_user_reference(member)}** has no warnings to clear.", ephemeral=True)
+            return
+
+        count = len(user_warnings)
+        user_warnings.clear()
+        save_guild_data(data)
+
+        automod, automod_data = get_guild_automod_config(str(interaction.guild.id))
+        sanction_state = automod.setdefault("warning_sanction_state", {})
+        sanction_state.pop(str(member.id), None)
+        save_guild_data(automod_data)
+
+        if not member.bot:
+            try:
+                dm_embed = discord.Embed(
+                    title="<:warning:1517452174991556758> All warnings cleared",
+                    description=f"**Server:** {interaction.guild.name}\n**Note:** {reason}",
+                    color=discord.Color.green()
+                )
+                await member.send(embed=dm_embed)
+            except (discord.Forbidden, discord.HTTPException):
+                pass
+
+        confirm_embed = discord.Embed(
+            title="<:warning:1517452174991556758> Warnings cleared",
+            description=f"All warnings have been cleared from **{format_user_reference(member)}**.",
+            color=discord.Color.green()
+        )
+        confirm_embed.add_field(name="Cleared warnings", value=str(count), inline=True)
+        confirm_embed.add_field(name="Note", value=reason, inline=False)
+        await interaction.response.send_message(embed=confirm_embed)
+        return
+
+    await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid action. Choose add, remove, or clear.", ephemeral=True)
+
+
+@bot.tree.command(name="warns_adm", description="Show warnings for a user")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(moderate_members=True)
+@app_commands.describe(
+    member="The user whose warnings you want to view"
+)
+async def warns_adm(
+    interaction: discord.Interaction,
+    member: discord.Member
+):
+    if member == interaction.user:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot view warnings for yourself with this command.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot view warnings for someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    user_warnings, _ = get_guild_warnings(str(interaction.guild.id), member.id)
+    if not user_warnings:
+        await interaction.response.send_message(f"<:approve:1517452125687513158> **{format_user_reference(member)}** has no warnings.", ephemeral=False)
+        return
+
+    embed = discord.Embed(
+        title=f"Warnings for {member.display_name}",
+        description=f"Total warnings: **{len(user_warnings)}**",
+        color=discord.Color.orange()
+    )
+
+    for index, warn_entry in enumerate(user_warnings[-10:], start=max(1, len(user_warnings) - 9)):
+        raw_timestamp = warn_entry.get("timestamp")
+        timestamp = "Unknown time"
+        if raw_timestamp:
+            try:
+                dt = datetime.fromisoformat(raw_timestamp)
+                timestamp = discord.utils.format_dt(dt, style="f")
+            except Exception:
+                timestamp = raw_timestamp
+        reason = warn_entry.get("reason", "No reason provided")
+        moderator = warn_entry.get("moderator_name", "Unknown moderator")
+        embed.add_field(
+            name=f"Warn {index}",
+            value=f"**Reason:** {reason}\n**Moderator:** {moderator}\n**Time:** {timestamp}",
+            inline=False
+        )
+
+    if len(user_warnings) > 10:
+        embed.set_footer(text=f"Showing the last 10 of {len(user_warnings)} warnings")
+
+    await interaction.response.send_message(embed=embed, ephemeral=False)
+
+
+class WarnsAdminView(discord.ui.View):
+    def __init__(self, author_id: int, member: discord.Member, warnings: list[dict], page: int = 0, timeout: int = 300):
+        super().__init__(timeout=timeout)
+        self.author_id = author_id
+        self.member = member
+        self.warnings = warnings
+        self.page = page
+        self.items_per_page = 10
+
+        self.prev_button = Button(label="Previous", style=discord.ButtonStyle.secondary)
+        self.next_button = Button(label="Next", style=discord.ButtonStyle.secondary)
+        self.close_button = Button(label="Close", style=discord.ButtonStyle.danger)
+
+        self.prev_button.callback = self.previous_page
+        self.next_button.callback = self.next_page
+        self.close_button.callback = self.close_view
+
+        self.add_item(self.prev_button)
+        self.add_item(self.next_button)
+        self.add_item(self.close_button)
+        self.update_buttons()
+
+    def update_buttons(self) -> None:
+        total_pages = max(1, (len(self.warnings) + self.items_per_page - 1) // self.items_per_page)
+        self.prev_button.disabled = self.page <= 0
+        self.next_button.disabled = self.page >= total_pages - 1
+
+    def get_page_embed(self) -> discord.Embed:
+        total_warnings = len(self.warnings)
+        total_pages = max(1, (total_warnings + self.items_per_page - 1) // self.items_per_page)
+        page = min(max(self.page, 0), total_pages - 1)
+        start = page * self.items_per_page
+        end = start + self.items_per_page
+        page_warnings = self.warnings[start:end]
+
+        embed = discord.Embed(
+            title=f"Warnings for {self.member.display_name}",
+            description=f"Total warnings: **{total_warnings}**",
+            color=discord.Color.orange()
+        )
+
+        for index, warn_entry in enumerate(page_warnings, start=start + 1):
+            raw_timestamp = warn_entry.get("timestamp")
+            timestamp = "Unknown time"
+            if raw_timestamp:
+                try:
+                    dt = datetime.fromisoformat(raw_timestamp)
+                    timestamp = discord.utils.format_dt(dt, style="f")
+                except Exception:
+                    timestamp = raw_timestamp
+            reason = warn_entry.get("reason", "No reason provided")
+            moderator = warn_entry.get("moderator_name", "Unknown moderator")
+            embed.add_field(
+                name=f"Warn {index}",
+                value=f"**Reason:** {reason}\n**Moderator:** {moderator}\n**Time:** {timestamp}",
+                inline=False
+            )
+
+        embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+        return embed
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589462> Only the command user can navigate these pages.", ephemeral=True)
+            return False
+        return True
+
+    async def previous_page(self, interaction: discord.Interaction) -> None:
+        self.page = max(0, self.page - 1)
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_page_embed(), view=self)
+
+    async def next_page(self, interaction: discord.Interaction) -> None:
+        total_pages = max(1, (len(self.warnings) + self.items_per_page - 1) // self.items_per_page)
+        self.page = min(total_pages - 1, self.page + 1)
+        self.update_buttons()
+        await interaction.response.edit_message(embed=self.get_page_embed(), view=self)
+
+    async def close_view(self, interaction: discord.Interaction) -> None:
+        self.prev_button.disabled = True
+        self.next_button.disabled = True
+        self.close_button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+@bot.tree.command(name="role_adm", description="Give or remove a role from a user")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(
+    action="Whether to add or remove the role",
+    member="The user to update",
+    role="The role to add or remove",
+    reason="Why this role change is being made"
+)
+@app_commands.choices(action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove")])
+async def role_adm(
+    interaction: discord.Interaction,
+    action: str,
+    member: discord.Member,
+    role: discord.Role,
+    reason: str = "No reason provided",
+):
+    role_error = validate_role_selection(interaction, role, "role")
+    if role_error:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage roles.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != member and member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot modify the roles of someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    try:
+        if action == "add":
+            if role in member.roles:
+                await interaction.response.send_message(f"<:warning:1517452174991556758> **{format_user_reference(member)}** already has **{role.name}**.", ephemeral=True)
+                return
+            await member.add_roles(role, reason=f"Role admin by {interaction.user} - {reason}")
+            await interaction.response.send_message(f"<:approve:1517452125687513158> Added **{role.name}** to **{format_user_reference(member)}**.", ephemeral=False)
+        else:
+            if role not in member.roles:
+                await interaction.response.send_message(f"<:warning:1517452174991556758> **{format_user_reference(member)}** does not have **{role.name}**.", ephemeral=True)
+                return
+            await member.remove_roles(role, reason=f"Role admin by {interaction.user} - {reason}")
+            await interaction.response.send_message(f"<:approve:1517452125687513158> Removed **{role.name}** from **{format_user_reference(member)}**.", ephemeral=False)
+    except discord.Forbidden:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage that role (Hierarchy issue).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="temp-role_adm", description="Grant or remove a temporary role from a user")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(
+    action="Whether to grant or remove the temporary role",
+    member="The user to update",
+    role="The temporary role to grant or remove",
+    duration="How long the temporary role should last (for example 30m, 2h, 1d)",
+    reason="Why this temporary role change is being made"
+)
+@app_commands.choices(action=[app_commands.Choice(name="Grant", value="grant"), app_commands.Choice(name="Remove", value="remove")])
+async def temp_role_adm(
+    interaction: discord.Interaction,
+    action: str,
+    member: discord.Member,
+    role: discord.Role,
+    duration: str = None,
+    reason: str = "No reason provided",
+):
+    role_error = validate_role_selection(interaction, role, "temporary role")
+    if role_error:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage roles.", ephemeral=True)
+        return
+
+    if not guild_owner_bypasses_role_checks(interaction) and interaction.user != member and member.top_role >= interaction.user.top_role:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> You cannot modify the roles of someone with an equal or higher role than yours.", ephemeral=True)
+        return
+
+    if action == "grant":
+        if not duration:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide a duration like 30m, 2h, or 1d.", ephemeral=True)
+            return
+
+        duration_seconds = parse_duration_to_seconds(duration)
+        if duration_seconds is None or duration_seconds <= 0:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide a valid duration like 30m, 2h, or 1d.", ephemeral=True)
+            return
+
+        try:
+            if role in member.roles:
+                await interaction.response.send_message(f"<:warning:1517452174991556758> **{format_user_reference(member)}** already has **{role.name}**.", ephemeral=True)
+                return
+            await member.add_roles(role, reason=f"Temporary role admin by {interaction.user} - {reason}")
+            async def remove_temp_role():
+                await asyncio.sleep(duration_seconds)
+                try:
+                    await member.remove_roles(role, reason=f"Temporary role expired after {duration} (admin command)")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+
+            asyncio.create_task(remove_temp_role())
+            await interaction.response.send_message(f"<:approve:1517452125687513158> Granted **{role.name}** to **{format_user_reference(member)}** for {duration}.", ephemeral=False)
+        except discord.Forbidden:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage that role (Hierarchy issue).", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
+        return
+
+    try:
+        if role not in member.roles:
+            await interaction.response.send_message(f"<:warning:1517452174991556758> **{format_user_reference(member)}** does not have **{role.name}**.", ephemeral=True)
+            return
+        await member.remove_roles(role, reason=f"Temporary role admin removal by {interaction.user} - {reason}")
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Removed **{role.name}** from **{format_user_reference(member)}**.", ephemeral=False)
+    except discord.Forbidden:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage that role (Hierarchy issue).", ephemeral=True)
+    except Exception as e:
+        await interaction.response.send_message(f"<:disapprove:1517452151012589662> An error occurred: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="role-for_adm", description="Add or remove a role from all members who have a target role")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_roles=True)
+@app_commands.describe(
+    action="Whether to add or remove the role",
+    role="The role to add or remove",
+    target_role="The role filter; members with this role will be affected (use @everyone for everyone)"
+)
+@app_commands.choices(action=[app_commands.Choice(name="Add", value="add"), app_commands.Choice(name="Remove", value="remove")])
+async def adm_role_for(
+    interaction: discord.Interaction,
+    action: str,
+    role: discord.Role,
+    target_role: discord.Role,
+):
+    role_error = validate_role_selection(interaction, role, "role")
+    if role_error:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    if role is None or target_role is None:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Both role options are required.", ephemeral=True)
+        return
+
+    if not interaction.guild.me.guild_permissions.manage_roles:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> I don't have permission to manage roles.", ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=False)
+
+    try:
+        await interaction.guild.chunk(cache=True)
+    except Exception:
+        pass
+
+    affected_members = [member for member in interaction.guild.members if target_role in member.roles]
+    if not affected_members:
+        await interaction.followup.send(f"<:warning:1517452174991556758> No members with the role **{target_role.name}** were found.", ephemeral=False)
+        return
+
+    updated = 0
+    skipped = 0
+    failed = 0
+    processed = 0
+    stop_progress_updates = asyncio.Event()
+
+    def build_progress_embed() -> discord.Embed:
+        progress_percent = (processed / len(affected_members) * 100) if affected_members else 100.0
+        action_text = "adding" if action == "add" else "removing"
+        embed = discord.Embed(
+            title="<:gear:1517576939097952496> Role Update In Progress",
+            description=f"{action_text.capitalize()} role **{role.name}** from members with **{target_role.name}**...",
+            color=discord.Color.blurple()
+        )
+        embed.add_field(name="<:list:1517497572770451567> Processed", value=f"{processed}/{len(affected_members)} ({progress_percent:.1f}%)", inline=True)
+        embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
+        embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
+        embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+        return embed
+
+    async def update_progress_message(message: discord.Message):
+        while not stop_progress_updates.is_set():
+            await asyncio.sleep(10)
+            if stop_progress_updates.is_set():
+                break
+            try:
+                await message.edit(embed=build_progress_embed())
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                break
+
+    progress_message = await interaction.followup.send(embed=build_progress_embed(), ephemeral=False)
+    progress_task = asyncio.create_task(update_progress_message(progress_message))
+
+    try:
+        for member in affected_members:
+            try:
+                if action == "add":
+                    if role not in member.roles:
+                        await member.add_roles(role, reason=f"Role mass update by {interaction.user}")
+                        updated += 1
+                    else:
+                        skipped += 1
+                else:
+                    if role in member.roles:
+                        await member.remove_roles(role, reason=f"Role mass update by {interaction.user}")
+                        updated += 1
+                    else:
+                        skipped += 1
+            except discord.Forbidden:
+                failed += 1
+            except Exception:
+                failed += 1
+            finally:
+                processed += 1
+    finally:
+        stop_progress_updates.set()
+        if progress_task:
+            try:
+                await progress_task
+            except Exception:
+                pass
+
+    action_text = "added to" if action == "add" else "removed from"
+    embed = discord.Embed(
+        title="<:gear:1517576939097952496> Role Update Complete",
+        description=f"The role **{role.name}** was {action_text} **{target_role.name}** members.",
+        color=discord.Color.green() if action == "add" else discord.Color.orange()
+    )
+    embed.add_field(name="<:graph:1517584522877866065> Affected Members", value=str(len(affected_members)), inline=True)
+    embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
+    embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
+    if failed:
+        embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+
+    try:
+        await progress_message.edit(content=f"<:approve:1517452125687513158> Finished updating roles.", embed=embed)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        await interaction.followup.send(embed=embed, ephemeral=False)
+
+
+@bot.tree.command(name="giveaway_adm", description="Create or cancel a giveaway")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.default_permissions(manage_guild=True)
+@app_commands.describe(
+    action="Create or cancel a giveaway",
+    name="The giveaway title",
+    winners="How many winners to select",
+    time="How long the giveaway lasts (e.g. 1h, 30m, 2d)",
+    role="Optional role to award to winners",
+    temp_role="Optional temporary role to award to winners",
+    temp_role_time="Temporary role duration in minutes",
+    item="Optional item reward",
+    money="Optional money reward",
+    xp="Optional XP reward"
+)
+@app_commands.choices(action=[app_commands.Choice(name="Create", value="create"), app_commands.Choice(name="Cancel", value="cancel")])
+async def adm_giveaway(
+    interaction: discord.Interaction,
+    action: str,
+    name: str = None,
+    winners: int = 1,
+    time: str = None,
+    role: discord.Role = None,
+    temp_role: discord.Role = None,
+    temp_role_time: int = 0,
+    item: str = None,
+    money: int = 0,
+    xp: int = 0,
+):
+    if action == "cancel":
+        if not name:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide the giveaway name to cancel.", ephemeral=True)
+            return
+
+        data = load_giveaway_data()
+        matched = None
+        for giveaway_id, giveaway in data.items():
+            if str(giveaway.get('guild_id')) == str(interaction.guild_id) and giveaway.get('status') == 'active' and str(giveaway.get('name', '')).lower() == name.lower():
+                matched = (giveaway_id, giveaway)
+                break
+
+        if not matched:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> I couldn't find an active giveaway with that name.", ephemeral=True)
+            return
+
+        giveaway_id, giveaway = matched
+        giveaway['status'] = 'cancelled'
+        data.pop(giveaway_id, None)
+        save_giveaway_data(data)
+
+        channel = interaction.channel
+        if channel and giveaway.get('message_id'):
+            try:
+                message = await channel.fetch_message(int(giveaway['message_id']))
+                view = GiveawayView(giveaway_id, giveaway)
+                await message.edit(view=view)
+            except Exception:
+                pass
+
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Cancelled giveaway **{name}**.")
+        return
+
+    if not name:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide a giveaway name.", ephemeral=True)
+        return
+    if winners <= 0:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Winners must be at least 1.", ephemeral=True)
+        return
+    if temp_role and temp_role_time <= 0:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Temporary role time must be greater than 0 when using a temp role.", ephemeral=True)
+        return
+
+    role_error = validate_role_selection(interaction, role, "role")
+    if role_error:
+        await interaction.response.send_message(role_error, ephemeral=True)
+        return
+
+    temp_role_error = validate_role_selection(interaction, temp_role, "temporary role")
+    if temp_role_error:
+        await interaction.response.send_message(temp_role_error, ephemeral=True)
+        return
+
+    duration_seconds = parse_duration_to_seconds(time or "30m")
+    if duration_seconds is None or duration_seconds <= 0:
+        await interaction.response.send_message("<:disapprove:1517452151012589662> Please provide a valid time like 30m, 1h, or 2d.", ephemeral=True)
+        return
+
+    giveaway_data = {
+        'name': name,
+        'host_id': interaction.user.id,
+        'winners_count': winners,
+        'entries': [],
+        'status': 'active',
+        'end_time': int((datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)).timestamp()),
+        'guild_id': interaction.guild_id,
+        'channel_id': interaction.channel_id,
+        'role_id': role.id if role else None,
+        'temp_role_id': temp_role.id if temp_role else None,
+        'temp_role_time': temp_role_time if temp_role else 0,
+        'item': item,
+        'money': money,
+        'xp': xp,
+    }
+
+    view = GiveawayView("placeholder", giveaway_data)
+    await interaction.response.send_message(view=view)
+    message = await interaction.original_response()
+
+    giveaway_id = f"{interaction.guild_id}:{interaction.channel_id}:{message.id}"
+    giveaway_data['message_id'] = message.id
+    data = load_giveaway_data()
+    data[giveaway_id] = giveaway_data
+    save_giveaway_data(data)
+
+    view = GiveawayView(giveaway_id, giveaway_data)
+    try:
+        await message.edit(view=view)
+    except Exception:
+        pass
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -3271,7 +4674,7 @@ async def forget(interaction: discord.Interaction):
     await interaction.response.send_message("I've wiped your messages, edits, and media from my memory!", ephemeral=True)
 
 
-@bot.tree.command(name="adm-forget", description="Clear edited and deleted history of a chosen user")
+@bot.tree.command(name="forget_adm", description="Clear edited and deleted history of a chosen user")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
 @app_commands.default_permissions(manage_messages=True)
@@ -3291,6 +4694,7 @@ async def adm_forget(interaction: discord.Interaction, user: discord.Member):
 # -------------------------------------------------------------------------------------------------------------
 #                                               Counter command, its alone now ]: poor thing 😭 all his friends moved to /settings 😭😭😭
 # -------------------------------------------------------------------------------------------------------------
+
 
 
 
@@ -3344,7 +4748,7 @@ async def on_guild_channel_delete(channel):
         save_lock_config(locked_channels, admin_log_channels)
 
 
-@bot.tree.command(name="lock-add", description="Lock this channel - messages will be logged and deleted.")
+@bot.tree.command(name="add_lock", description="Lock this channel - messages will be logged and deleted.")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def lock_command(interaction: discord.Interaction):
@@ -3353,7 +4757,7 @@ async def lock_command(interaction: discord.Interaction):
     await interaction.response.send_message(f"<:locked:1517574877257924809> Channel locked.")
 
 
-@bot.tree.command(name="lock-remove", description="Unlock this channel.")
+@bot.tree.command(name="remove_lock", description="Unlock this channel.")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def unlock_command(interaction: discord.Interaction):
@@ -3365,19 +4769,7 @@ async def unlock_command(interaction: discord.Interaction):
         await interaction.response.send_message("<:warning:1517452174991556758> This channel is not currently locked.", ephemeral=True)
 
 
-@bot.tree.command(name="lock-adminstop", description="Stop admin logging in this channel.")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.default_permissions(manage_guild=True)
-async def adminstop_command(interaction: discord.Interaction):
-    if interaction.channel_id in admin_log_channels:
-        admin_log_channels.pop(interaction.channel_id)
-        save_lock_config(locked_channels, admin_log_channels)
-        await interaction.response.send_message("<:prohibited:1517497579582132436> **Logging stopped.**")
-    else:
-        await interaction.response.send_message("<:warning:1517452174991556758> This channel has no active logging.", ephemeral=True)
-
-
-@bot.tree.command(name="lock-pause", description="Pause message deletion for this channel or all locked channels.")
+@bot.tree.command(name="pause_lock", description="Pause message deletion for this channel or all locked channels.")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def pause_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
@@ -3392,7 +4784,7 @@ async def pause_command(interaction: discord.Interaction, channel: discord.TextC
     await interaction.response.send_message(f"<:pause:1517497575219920986> Message deletion paused for {channel.mention}.")
 
 
-@bot.tree.command(name="lock-resume", description="Resume message deletion for this channel or all locked channels.")
+@bot.tree.command(name="resume_lock", description="Resume message deletion for this channel or all locked channels.")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def resume_command(interaction: discord.Interaction, channel: discord.TextChannel = None):
@@ -3491,7 +4883,152 @@ async def create_goodbye_card(member):
     buffer.seek(0)
     return discord.File(buffer, filename="goodbye.png")
 
-def wrap_text(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int) -> list[str]:
+def is_emoji_character(char: str) -> bool:
+    if not char:
+        return False
+
+    codepoint = ord(char)
+    if codepoint in {0x200D, 0xFE0F}:
+        return True
+
+    return (
+        0x1F300 <= codepoint <= 0x1FAFF
+        or 0x2600 <= codepoint <= 0x27BF
+        or 0x1F1E6 <= codepoint <= 0x1F1FF
+    )
+
+
+def can_render_glyph(font: ImageFont.ImageFont, char: str) -> bool:
+    if not font or not char:
+        return False
+
+    try:
+        test_image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        test_draw = ImageDraw.Draw(test_image)
+        test_draw.text((8, 8), char, fill=(255, 255, 255), font=font)
+        return test_image.getbbox() is not None
+    except Exception:
+        return False
+
+
+def find_font_file(base_path: str, filename_hint: str | None = None, text: str | None = None) -> str | None:
+    fonts_dir = os.path.join(base_path, "fonts")
+    roots = []
+    if filename_hint:
+        roots.extend([
+            os.path.join(base_path, filename_hint),
+            os.path.join(fonts_dir, filename_hint),
+        ])
+    roots.append(fonts_dir)
+    roots.append(base_path)
+
+    seen = set()
+    preferred_paths: list[str] = []
+    fallback_paths: list[str] = []
+
+    for root in roots:
+        if not root or root in seen:
+            continue
+        seen.add(root)
+        if os.path.isfile(root):
+            if filename_hint and os.path.basename(root).lower() != filename_hint.lower():
+                continue
+            preferred_paths.append(root)
+            continue
+
+        if not os.path.isdir(root):
+            continue
+
+        for dirpath, dirnames, filenames in os.walk(root):
+            dirnames.sort()
+            filenames.sort()
+            for name in filenames:
+                if not name.lower().endswith((".ttf", ".ttc")):
+                    continue
+                full_path = os.path.join(dirpath, name)
+                if full_path in seen:
+                    continue
+                seen.add(full_path)
+                if filename_hint and name.lower() != filename_hint.lower():
+                    continue
+                if "notosans" in full_path.lower():
+                    preferred_paths.append(full_path)
+                else:
+                    fallback_paths.append(full_path)
+
+    for candidate in preferred_paths + fallback_paths:
+        if not os.path.exists(candidate):
+            continue
+        try:
+            font = ImageFont.truetype(candidate, 12)
+            if text:
+                characters_to_test = [char for char in text if ord(char) > 127 and not is_emoji_character(char)]
+                if characters_to_test and any(can_render_glyph(font, char) for char in characters_to_test):
+                    return candidate
+            else:
+                return candidate
+        except Exception:
+            continue
+
+    return None
+
+
+def load_emoji_font(base_path: str, size: int, fallback_font: ImageFont.ImageFont | None = None) -> ImageFont.ImageFont | None:
+    candidate_paths = [
+        os.path.join(base_path, "NotoEmoji.ttf"),
+        find_font_file(base_path, "NotoEmoji.ttf"),
+    ]
+
+    for font_path in candidate_paths:
+        if not font_path or not os.path.exists(font_path):
+            continue
+        try:
+            font = ImageFont.truetype(font_path, size)
+            if can_render_glyph(font, "😀"):
+                return font
+        except Exception:
+            continue
+
+    return fallback_font
+
+
+def load_text_font(base_path: str, text: str, size: int, fallback_font: ImageFont.ImageFont | None = None) -> ImageFont.ImageFont | None:
+    if not text:
+        return fallback_font
+
+    font_path = find_font_file(base_path)
+    if not font_path:
+        return fallback_font
+
+    try:
+        font = ImageFont.truetype(font_path, size)
+        if any(ord(char) > 127 and not is_emoji_character(char) for char in text):
+            if can_render_glyph(font, text[0]):
+                return font
+        return fallback_font
+    except Exception:
+        return fallback_font
+
+
+def measure_text_width(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, emoji_font: ImageFont.ImageFont | None = None) -> int:
+    width = 0
+    for char in text:
+        current_font = emoji_font if emoji_font and is_emoji_character(char) else font
+        bbox = draw.textbbox((0, 0), char, font=current_font)
+        width += bbox[2] - bbox[0]
+    return width
+
+
+def draw_text_with_font_fallback(draw: ImageDraw.ImageDraw, xy: tuple[int, int], text: str, font: ImageFont.ImageFont, emoji_font: ImageFont.ImageFont | None = None, fill=(255, 255, 255)) -> None:
+    x, y = xy
+    for char in text:
+        current_font = emoji_font if emoji_font and is_emoji_character(char) else font
+        draw.text((x, y), char, fill=fill, font=current_font)
+        bbox = draw.textbbox((0, 0), char, font=current_font)
+        x += bbox[2] - bbox[0]
+
+
+def wrap_text(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, max_width: int, emoji_font: ImageFont.ImageFont | None = None) -> list[str]:
     lines = []
     for paragraph in text.splitlines() or [""]:
         if not paragraph:
@@ -3506,7 +5043,7 @@ def wrap_text(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, m
         current_line = words[0]
         for word in words[1:]:
             test_line = f"{current_line} {word}"
-            if draw.textbbox((0, 0), test_line, font=font)[2] <= max_width:
+            if measure_text_width(test_line, draw, font, emoji_font) <= max_width:
                 current_line = test_line
             else:
                 lines.append(current_line)
@@ -3514,6 +5051,59 @@ def wrap_text(text: str, draw: ImageDraw.ImageDraw, font: ImageFont.ImageFont, m
         lines.append(current_line)
 
     return lines
+
+
+def format_quote_content(message: discord.Message) -> str:
+    content = message.content.strip() or "[Embed or media content]"
+    if not content:
+        return content
+
+    content = re.sub(r"<a?:[A-Za-z0-9_]+:\d+>", "", content)
+    content = re.sub(r"\s+", " ", content).strip()
+    if not content:
+        return "[Embed or media content]"
+
+    replacements: list[tuple[str, str]] = []
+
+    for user_id in getattr(message, "raw_mentions", []) or []:
+        user = None
+        for mention in getattr(message, "mentions", []) or []:
+            if getattr(mention, "id", None) == user_id:
+                user = mention
+                break
+        if user is None and getattr(message, "guild", None):
+            user = message.guild.get_member(user_id) or message.guild.get_user(user_id)
+        if user is None:
+            continue
+
+        username = getattr(user, "name", None) or str(user_id)
+        replacements.append((f"<@{user_id}>", f"@{username}"))
+        replacements.append((f"<@!{user_id}>", f"@{username}"))
+
+    for channel_id in getattr(message, "raw_channel_mentions", []) or []:
+        channel = None
+        for mention in getattr(message, "channel_mentions", []) or []:
+            if getattr(mention, "id", None) == channel_id:
+                channel = mention
+                break
+        if channel is None and getattr(message, "guild", None):
+            channel = message.guild.get_channel(channel_id)
+        if channel is None:
+            continue
+
+        channel_name = getattr(channel, "name", None) or str(channel_id)
+        replacements.append((f"<# {channel_id}>", f"#{channel_name}"))
+        replacements.append((f"<#{channel_id}>", f"#{channel_name}"))
+
+    if getattr(message, "guild", None):
+        for role in getattr(message, "role_mentions", []) or []:
+            role_name = getattr(role, "name", None) or str(getattr(role, "id", ""))
+            replacements.append((f"<@&{role.id}>", f"@&{role_name}"))
+
+    for old, new in sorted(replacements, key=lambda item: len(item[0]), reverse=True):
+        content = content.replace(old, new)
+
+    return content.replace('\n', ' ')
 
 
 async def create_quote_card(message: discord.Message):
@@ -3553,17 +5143,23 @@ async def create_quote_card(message: discord.Message):
         font_display = ImageFont.load_default()
 
     display_name_is_ascii = not any(ord(char) > 127 for char in message.author.display_name)
-    display_name_text = f"- {message.author.display_name if display_name_is_ascii else message.author.name}"
-    username_text = f"@{message.author.name}"
+    display_name_value = message.author.display_name if display_name_is_ascii else message.author.name
+    if len(display_name_value) > 15:
+        display_name_value = display_name_value[:14] + "..."
+    display_name_text = f"- {display_name_value}"
+
+    username_value = message.author.name
+    if len(username_value) > 12:
+        username_value = username_value[:11] + "..."
+    username_text = f"@{username_value}"
     show_username = display_name_is_ascii
 
-    original_content = message.content.strip() or "[Embed or media content]"
+    original_content = format_quote_content(message)
     content_text = original_content
-    content_text = content_text.replace('\n', ' ')
-    content_text = content_text.replace('"', '\\"')
-    had_non_ascii = any(ord(char) > 127 for char in original_content)
-    content_text = unicodedata.normalize('NFKD', content_text)
-    content_text = content_text.encode('ascii', 'ignore').decode('ascii')
+    has_emoji = any(is_emoji_character(char) for char in original_content)
+    had_non_ascii = any(ord(char) > 127 and not is_emoji_character(char) for char in original_content)
+    use_local_font = had_non_ascii or has_emoji
+    quote_font_path = find_font_file(base_path, text=content_text) if use_local_font else font_path
     content_text = f'"{content_text}"'
 
     bg_width, bg_height = background.size
@@ -3573,49 +5169,74 @@ async def create_quote_card(message: discord.Message):
     footer_y = bg_height - 44
 
     quote_font_size = 24
-    quote_font = font_big
-    lines = wrap_text(content_text, draw, quote_font, max_text_width)
+    try:
+        if quote_font_path:
+            quote_font = ImageFont.truetype(quote_font_path, quote_font_size)
+        else:
+            quote_font = font_big
+    except Exception:
+        quote_font = font_big
+    quote_emoji_font = load_emoji_font(base_path, quote_font_size, quote_font)
+    lines = wrap_text(content_text, draw, quote_font, max_text_width, quote_emoji_font)
 
     if len(lines) > 4:
         quote_font_size = max(12, 24 - 4 * (len(lines) - 4))
-        quote_font = ImageFont.truetype(font_path, quote_font_size)
-        lines = wrap_text(content_text, draw, quote_font, max_text_width)
+        try:
+            if quote_font_path:
+                quote_font = ImageFont.truetype(quote_font_path, quote_font_size)
+            else:
+                quote_font = font_big
+        except Exception:
+            quote_font = font_big
+        quote_emoji_font = load_emoji_font(base_path, quote_font_size, quote_font)
+        lines = wrap_text(content_text, draw, quote_font, max_text_width, quote_emoji_font)
         if len(lines) > 4:
             quote_font_size = max(12, 24 - 4 * (len(lines) - 4))
-            quote_font = ImageFont.truetype(font_path, quote_font_size)
-            lines = wrap_text(content_text, draw, quote_font, max_text_width)
+            try:
+                if quote_font_path:
+                    quote_font = ImageFont.truetype(quote_font_path, quote_font_size)
+                else:
+                    quote_font = font_big
+            except Exception:
+                quote_font = font_big
+            quote_emoji_font = load_emoji_font(base_path, quote_font_size, quote_font)
+            lines = wrap_text(content_text, draw, quote_font, max_text_width, quote_emoji_font)
 
     line_height = int(getattr(quote_font, 'size', quote_font_size) * 1.4)
     max_lines = max(1, (footer_y - text_y) // line_height)
-    truncated = False
     if len(lines) > max_lines:
-        truncated = True
-        if quote_font_size == 12:
-            visible = lines[:max_lines]
-            ellipsis = "..."
-            while ellipsis and draw.textbbox((0, 0), ellipsis, font=quote_font)[2] > max_text_width:
+        visible = lines[:max_lines]
+        ellipsis = "..."
+        try:
+            while ellipsis and measure_text_width(ellipsis, draw, quote_font, quote_emoji_font) > max_text_width:
                 ellipsis = ellipsis[:-1]
+        except Exception:
+            pass
 
-            last = visible[-1]
-            if ellipsis:
-                while last and draw.textbbox((0, 0), last + ellipsis, font=quote_font)[2] > max_text_width:
+        last = visible[-1] if visible else ""
+        if ellipsis and last:
+            try:
+                while last and measure_text_width(last + ellipsis, draw, quote_font, quote_emoji_font) > max_text_width:
                     last = last[:-1]
-                last = last.rstrip()
-                if not last:
-                    visible[-1] = ellipsis
-                else:
-                    visible[-1] = last + ellipsis
+            except Exception:
+                pass
+            last = last.rstrip()
+            if not last:
+                visible[-1] = ellipsis
             else:
-                while last and draw.textbbox((0, 0), last, font=quote_font)[2] > max_text_width:
-                    last = last[:-1]
-                visible[-1] = last
-
-            lines = visible
+                visible[-1] = last + ellipsis
         else:
-            lines = lines[:max_lines]
+            try:
+                while last and measure_text_width(last, draw, quote_font, quote_emoji_font) > max_text_width:
+                    last = last[:-1]
+            except Exception:
+                pass
+            visible[-1] = last
+
+        lines = visible
 
     for line in lines:
-        draw.text((text_x, text_y), line, fill=(255, 255, 255), font=quote_font)
+        draw_text_with_font_fallback(draw, (text_x, text_y), line, quote_font, quote_emoji_font, fill=(255, 255, 255))
         text_y += line_height
 
     display_bbox = draw.textbbox((0, 0), display_name_text, font=font_display)
@@ -3628,23 +5249,6 @@ async def create_quote_card(message: discord.Message):
         username_bbox = draw.textbbox((0, 0), username_text, font=font_small)
         username_x = bg_width - 30 - (username_bbox[2] - username_bbox[0])
         draw.text((username_x, username_y), username_text, fill=(100, 100, 100), font=font_small)
-
-    notices = []
-    if 'had_non_ascii' in locals() and had_non_ascii:
-        notices.append("ASCII Error")
-    if truncated:
-        notices.append("Size Error")
-
-    if notices:
-        notice_text = " | ".join(notices)
-        try:
-            notice_font = ImageFont.truetype(font_path, 12)
-        except Exception:
-            notice_font = font_small
-        notice_color = (255, 60, 60)
-        notice_x = 25
-        notice_y = footer_y - -5
-        draw.text((notice_x, notice_y), notice_text, fill=notice_color, font=notice_font)
 
     buffer = io.BytesIO()
     background.save(buffer, format="PNG")
@@ -3661,7 +5265,7 @@ async def create_quote_card(message: discord.Message):
 
 
 
-@bot.tree.command(name="eco-leaderboard", description="Show the server economy leaderboard")
+@bot.tree.command(name="economy-leaderboard", description="Show the server economy leaderboard")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_leaderboard(interaction: discord.Interaction, limit: int = 10):
     if limit <= 0:
@@ -3695,7 +5299,7 @@ async def eco_leaderboard(interaction: discord.Interaction, limit: int = 10):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="eco-balance", description="Check your balance or another user's balance")
+@bot.tree.command(name="balance", description="Check your balance or another user's balance")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.describe(user="The user whose balance you want to check")
 async def eco_balance(interaction: discord.Interaction, user: discord.Member = None):
@@ -3705,7 +5309,7 @@ async def eco_balance(interaction: discord.Interaction, user: discord.Member = N
     await interaction.response.send_message(f"<:money:1517580310395486239> {target.display_name}'s balance: **${money}**")
 
 
-@bot.tree.command(name="eco-daily", description="Claim your daily reward")
+@bot.tree.command(name="daily", description="Claim your daily reward")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.checks.cooldown(1, 86400, key=lambda i: (i.user.id, i.guild.id))
 async def eco_daily(interaction: discord.Interaction):
@@ -3717,7 +5321,7 @@ async def eco_daily(interaction: discord.Interaction):
     await interaction.response.send_message(f"<:money:1517580310395486239> You claimed your daily reward and earned **${earnings}**!")
 
 
-@bot.tree.command(name="eco-pay", description="Pay another user from your balance")
+@bot.tree.command(name="pay", description="Pay another user from your balance")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_pay(interaction: discord.Interaction, user: discord.Member, amount: int):
     if amount <= 0:
@@ -3734,7 +5338,7 @@ async def eco_pay(interaction: discord.Interaction, user: discord.Member, amount
     await interaction.response.send_message(f"<:approve:1517452125687513158> Successfully sent **${amount}** to {format_user_reference(user)}!")
 
 
-@bot.tree.command(name="eco-shop", description="View the server shop")
+@bot.tree.command(name="shop", description="View the server shop")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_shop(interaction: discord.Interaction):
     data = load_data()
@@ -3747,7 +5351,7 @@ async def eco_shop(interaction: discord.Interaction):
     await interaction.response.send_message(view=view)
 
 
-@bot.tree.command(name="eco-inventory", description="Check your inventory or another user's inventory")
+@bot.tree.command(name="inventory", description="Check your inventory or another user's inventory")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.describe(user="The user whose inventory you want to check")
 async def eco_inventory(interaction: discord.Interaction, user: discord.Member = None):
@@ -3763,7 +5367,7 @@ async def eco_inventory(interaction: discord.Interaction, user: discord.Member =
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="eco-inventory-edit", description="Edit a user's inventory (Owner Only)")
+@bot.tree.command(name="inventory-edit", description="Edit a user's inventory (Owner Only)")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def eco_inventory_edit(interaction: discord.Interaction, user: discord.Member, item: str, action: str, amount: int = 1):
@@ -3787,7 +5391,7 @@ async def eco_inventory_edit(interaction: discord.Interaction, user: discord.Mem
     await interaction.response.send_message(f"<:approve:1517452125687513158> {action.capitalize()}d **{amount}x {item}** {direction} {user.display_name}'s inventory.")
 
 
-@bot.tree.command(name="eco-balance-edit", description="Set a user's balance (Owner Only)")
+@bot.tree.command(name="balance-edit", description="Set a user's balance (Owner Only)")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.default_permissions(manage_guild=True)
 async def eco_balance_edit(interaction: discord.Interaction, user: discord.Member, amount: int):
@@ -3807,7 +5411,8 @@ async def eco_balance_edit(interaction: discord.Interaction, user: discord.Membe
 
 
 
-@bot.tree.command(name="game-slot", description="Play the economy slot machine and wager money")
+
+@bot.tree.command(name="slot_game", description="Play the economy slot machine and wager money")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def game_slot(interaction: discord.Interaction, amount: int):
     if amount <= 0:
@@ -3842,7 +5447,7 @@ async def game_slot(interaction: discord.Interaction, amount: int):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="game-coinflip", description="Play coinflip and wager money")
+@bot.tree.command(name="coinflip_game", description="Play coinflip and wager money")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def game_coinflip(interaction: discord.Interaction, amount: int):
     if amount <= 0:
@@ -4088,7 +5693,7 @@ class MinesGameView(discord.ui.View):
                 pass
 
 
-@bot.tree.command(name="game-mines", description="Play minesweeper and wager money")
+@bot.tree.command(name="minesweeper_game", description="Play minesweeper and wager money")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def game_mines(interaction: discord.Interaction, amount: int, mines: int):
     if amount <= 0:
@@ -4302,7 +5907,7 @@ class TowersGameView(discord.ui.View):
                 pass
 
 
-@bot.tree.command(name="game-towers", description="Play tower gamble and wager money")
+@bot.tree.command(name="towers_game", description="Play tower gamble and wager money")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def game_towers(interaction: discord.Interaction, amount: int):
     if amount <= 0:
@@ -4653,7 +6258,7 @@ def get_work_payout(difficulty: str) -> int:
     return random.randint(low, high)
 
 
-@bot.tree.command(name="game-work", description="Work to earn money (get 1 of 3 random jobs, 2 hour cooldown)")
+@bot.tree.command(name="work_game", description="Work to earn money (get 1 of 3 random jobs, 2 hour cooldown)")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.describe(difficulty="Choose the work difficulty")
 @app_commands.choices(
@@ -4708,7 +6313,7 @@ async def game_work(interaction: discord.Interaction, difficulty: str = "normal"
 
 
 
-@bot.tree.command(name="eco-craft", description="Craft an item")
+@bot.tree.command(name="craft", description="Craft an item")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_craft(interaction: discord.Interaction, item: str, amount: int = 1):
     data = load_data()
@@ -4738,7 +6343,7 @@ async def eco_craft(interaction: discord.Interaction, item: str, amount: int = 1
     await interaction.followup.send(f"<:approve:1517452125687513158> Finished crafting {amount}x **{canonical_item}**!")
 
 
-@bot.tree.command(name="eco-use", description="Use an item from your inventory")
+@bot.tree.command(name="use", description="Use an item from your inventory")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_use(interaction: discord.Interaction, item: str, number_of_times: int = 1):
     data = load_data()
@@ -4810,7 +6415,7 @@ async def eco_use(interaction: discord.Interaction, item: str, number_of_times: 
         await interaction.response.send_message(final_msg)
 
 
-@bot.tree.command(name="eco-sell", description="Sell a specific amount of an item from your inventory")
+@bot.tree.command(name="sell", description="Sell a specific amount of an item from your inventory")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def eco_sell(interaction: discord.Interaction, item: str, amount: int = 1):
     if amount <= 0:
@@ -4837,7 +6442,7 @@ async def eco_sell(interaction: discord.Interaction, item: str, amount: int = 1)
     )
 
 
-@bot.tree.command(name="info-values", description="Show all items that can be sold and their prices")
+@bot.tree.command(name="values_info", description="Show all items that can be sold and their prices")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def info_values(interaction: discord.Interaction):
     data = load_data()
@@ -4852,7 +6457,7 @@ async def info_values(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="info-recipes", description="Show all available crafting recipes")
+@bot.tree.command(name="recipes_info", description="Show all available crafting recipes")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def info_recipes(interaction: discord.Interaction):
     data = load_data()
@@ -4873,7 +6478,7 @@ async def info_recipes(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="info-uses", description="Show what items do when used")
+@bot.tree.command(name="uses_info", description="Show what items do when used")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def info_uses(interaction: discord.Interaction):
     data = load_data()
@@ -4951,10 +6556,8 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
         user_data["level"] += 1
         leveled_up = True
         
-    first_time_level_up = False
-    if leveled_up and not get_user_has_leveled_up_before(user_id):
-        first_time_level_up = True
-        set_user_has_leveled_up_before(user_id, True)
+    has_leveled_up_before = get_user_has_leveled_up_before(user_id)
+    first_time_level_up = leveled_up and not has_leveled_up_before
 
     save_levels(levels)
     
@@ -4962,6 +6565,7 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
         rewards = levels[guild_id]["config"].get("rewards", {})
         current_level = user_data["level"]
         reward = rewards.get(str(current_level))
+        level_up_notification_sent = False
         if reward:
             if isinstance(reward, (str, int)):
                 reward = {"role_id": int(reward)}
@@ -5010,6 +6614,7 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
                 if first_time_level_up:
                     level_up_message += "\n-# Use /settings and go to the user settings to disable pings."
                 await announce_channel.send(level_up_message)
+                level_up_notification_sent = True
             except discord.Forbidden as error:
                 add_bot_error_entry(guild.id, announce_channel.id, member, "level up message", error)
             except Exception:
@@ -5030,8 +6635,12 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
                         content=level_banner_message,
                         file=file
                     )
+                    level_up_notification_sent = True
                 except discord.Forbidden as error:
                     add_bot_error_entry(guild.id, target_channel.id, member, "level banner", error)
+
+        if first_time_level_up and level_up_notification_sent:
+            set_user_has_leveled_up_before(user_id, True)
 
 
 async def create_levelup_card(member: discord.Member, level: int):
@@ -5118,7 +6727,7 @@ async def view_level(interaction: discord.Interaction, user: discord.Member = No
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="lvl-leaderboard", description="Display the top 10 highest-level users in this guild")
+@bot.tree.command(name="level-leaderboard", description="Display the top 10 highest-level users in this guild")
 @app_commands.allowed_installs(guilds=True, users=False)
 async def level_leaderboard(interaction: discord.Interaction):
     levels = load_levels()
@@ -5142,7 +6751,7 @@ async def level_leaderboard(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed)
 
 
-@bot.tree.command(name="lvl-edit", description="(Admin) Manually adjust or set a target user's level and XP indexes")
+@bot.tree.command(name="level-edit", description="(Admin) Manually adjust or set a target user's level and XP indexes")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.checks.has_permissions(manage_guild=True)
 async def lvl_edit(interaction: discord.Interaction, user: discord.Member, level: int, xp: int = 0):
@@ -5203,7 +6812,7 @@ def format_level_reward_summary(guild: discord.Guild, level: str, reward_data: d
     return f"Level {level}: " + " | ".join(parts)
 
 
-@bot.tree.command(name="info-lvl-rewards", description="Show the level rewards configured for this guild")
+@bot.tree.command(name="rewards_info", description="Show the level rewards configured for this guild")
 @app_commands.allowed_installs(guilds=True, users=False)
 @app_commands.describe(level="Optional specific level to inspect")
 async def info_lvl_rewards(interaction: discord.Interaction, level: int = None):
@@ -5234,27 +6843,6 @@ async def info_lvl_rewards(interaction: discord.Interaction, level: int = None):
         )
 
     await interaction.response.send_message(embed=embed)
-
-
-@bot.tree.command(name="lvl-rewards-del", description="(Admin) Delete all rewards configured for a level")
-@app_commands.allowed_installs(guilds=True, users=False)
-@app_commands.checks.has_permissions(manage_guild=True)
-@app_commands.describe(level="The level whose rewards should be removed")
-async def lvl_rewards_del(interaction: discord.Interaction, level: int):
-    levels = load_levels()
-    g_id = str(interaction.guild_id)
-
-    if g_id not in levels or "config" not in levels[g_id] or "rewards" not in levels[g_id]["config"]:
-        return await interaction.response.send_message(f"<:disapprove:1517452151012589662> No rewards are configured for level {level} in this server.", ephemeral=True)
-
-    rewards = levels[g_id]["config"]["rewards"]
-    if str(level) not in rewards:
-        return await interaction.response.send_message(f"<:disapprove:1517452151012589662> No rewards are configured for level {level} in this server.", ephemeral=True)
-
-    del rewards[str(level)]
-    save_levels(levels)
-
-    await interaction.response.send_message(f"<:trash:1517497581058527404> Removed all rewards configured for level {level}.", ephemeral=True)
 
 
 
@@ -5302,7 +6890,7 @@ def update_env_setting(key: str, value: str) -> None:
 @bot.command(name="ver")
 async def set_bot_version(ctx: commands.Context, *, new_value: str = ""):
     if not await bot.is_owner(ctx.author):
-        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
     global VERSION
 
@@ -5322,7 +6910,7 @@ async def set_bot_version(ctx: commands.Context, *, new_value: str = ""):
 @bot.command(name="alt")
 async def set_bot_alt_version(ctx: commands.Context, *, new_value: str = ""):
     if not await bot.is_owner(ctx.author):
-        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
     global VERSION_ALTERNATE
 
@@ -5342,7 +6930,7 @@ async def set_bot_alt_version(ctx: commands.Context, *, new_value: str = ""):
 @bot.command(name="activity")
 async def set_bot_activity(ctx: commands.Context, *, new_value: str = ""):
     if not await bot.is_owner(ctx.author):
-        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
     global ACTIVITY_TEXT
 
@@ -5362,7 +6950,7 @@ async def set_bot_activity(ctx: commands.Context, *, new_value: str = ""):
 @bot.command(name="shutdown")
 async def own_shutdown(ctx: commands.Context, *, args: str = ""):
     if not await bot.is_owner(ctx.author):
-        return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
     channel = None
     reason = "No reason provided"
@@ -5381,7 +6969,6 @@ async def own_shutdown(ctx: commands.Context, *, args: str = ""):
         channel = bot.get_channel(1514173159052415026)
     if channel is None and isinstance(ctx.channel, discord.TextChannel):
         channel = ctx.channel
-
     shutdown_text = f"🔌 {reason}"
     shutdown_embed = discord.Embed(
         title="Bot Shutdown Initiated",
@@ -5429,6 +7016,68 @@ async def own_shutdown(ctx: commands.Context, *, args: str = ""):
         await bot.change_presence(activity=sleep_activity, status=discord.Status.idle, shard_id=shard_id)
     close_local_rpc()
     await bot.close()
+
+
+class ServersListView(discord.ui.View):
+    def __init__(self, author_id: int, guilds: list[discord.Guild], page: int = 0):
+        super().__init__(timeout=None)
+        self.author_id = author_id
+        self.guilds = guilds
+        self.page = page
+        self.guilds_per_page = 15
+
+    def get_page_embed(self) -> discord.Embed:
+        total_pages = max(1, (len(self.guilds) + self.guilds_per_page - 1) // self.guilds_per_page)
+        page = min(max(self.page, 0), total_pages - 1)
+        start = page * self.guilds_per_page
+        end = start + self.guilds_per_page
+        chunk = self.guilds[start:end]
+
+        embed = discord.Embed(
+            title="Bot Servers",
+            description=f"Showing servers {start + 1}-{min(end, len(self.guilds))} of {len(self.guilds)}",
+            color=discord.Color.blue(),
+        )
+
+        for guild in chunk:
+            embed.add_field(
+                name=guild.name,
+                value=f"ID: `{guild.id}`\nMembers: {guild.member_count}",
+                inline=False,
+            )
+
+        embed.set_footer(text=f"Page {page + 1}/{total_pages}")
+        return embed
+
+    async def update_message(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=self.get_page_embed(), view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary)
+    async def previous_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command owner can navigate these pages.", ephemeral=True)
+            return
+        self.page = max(0, self.page - 1)
+        await self.update_message(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message("Only the command owner can navigate these pages.", ephemeral=True)
+            return
+        total_pages = max(1, (len(self.guilds) + self.guilds_per_page - 1) // self.guilds_per_page)
+        self.page = min(total_pages - 1, self.page + 1)
+        await self.update_message(interaction)
+
+
+@bot.command(name="servers")
+async def list_servers(ctx: commands.Context):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
+
+    guilds = sorted(bot.guilds, key=lambda g: g.name.lower())
+    view = ServersListView(ctx.author.id, guilds)
+    await ctx.send(embed=view.get_page_embed(), view=view)
 
 
 
@@ -5481,21 +7130,6 @@ class SettingsMenuView(LayoutView):
             style=discord.ButtonStyle.primary,
             custom_id="settings_open_guild",
         )
-        self.channel_button = Button(
-            label="Open",
-            style=discord.ButtonStyle.primary,
-            custom_id="settings_open_channel",
-        )
-        self.economy_button = Button(
-            label="Open",
-            style=discord.ButtonStyle.primary,
-            custom_id="settings_open_economy",
-        )
-        self.level_button = Button(
-            label="Open",
-            style=discord.ButtonStyle.primary,
-            custom_id="settings_open_level",
-        )
 
         async def open_user(interaction: discord.Interaction):
             settings = load_user_settings()
@@ -5523,104 +7157,20 @@ class SettingsMenuView(LayoutView):
                 )
                 return
 
-            guild_id = str(interaction.guild.id)
-            guild_config, _ = get_guild_config(guild_id)
-            new_view = GuildSettingsView(
+            new_view = GuildSettingsMenuView(
                 interaction.user.id,
-                guild_id,
-                ghost_pings=guild_config.get("ghost_ping_enabled", False),
-                history_enabled=guild_config.get("edit_delete_history_enabled", True),
-                level_up_enabled=guild_config.get("level_up_message_enabled", False),
-            )
-            await interaction.response.edit_message(view=new_view)
-
-        async def open_channel_settings(interaction: discord.Interaction):
-            if not interaction.guild:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use channel settings from a user install.",
-                    ephemeral=True,
-                )
-                return
-
-            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
-            if not member or not member.guild_permissions.manage_channels:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Channels permission.",
-                    ephemeral=True,
-                )
-                return
-
-            guild_id = str(interaction.guild.id)
-            new_view = ChannelSettingsView(
-                interaction.user.id,
-                guild_id,
-                get_user_color_value(str(interaction.user.id)),
-            )
-            await interaction.response.edit_message(view=new_view)
-
-        async def open_economy_settings(interaction: discord.Interaction):
-            if not interaction.guild:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use economy settings from a user install.",
-                    ephemeral=True,
-                )
-                return
-
-            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
-            if not member or not member.guild_permissions.manage_guild:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
-                    ephemeral=True,
-                )
-                return
-
-            guild_id = str(interaction.guild.id)
-            new_view = EconomySettingsView(
-                interaction.user.id,
-                guild_id,
-                get_user_color_value(str(interaction.user.id)),
-            )
-            await interaction.response.edit_message(view=new_view)
-
-        async def open_level_settings(interaction: discord.Interaction):
-            if not interaction.guild:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use level settings from a user install.",
-                    ephemeral=True,
-                )
-                return
-
-            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
-            if not member or not member.guild_permissions.manage_guild:
-                await interaction.response.send_message(
-                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
-                    ephemeral=True,
-                )
-                return
-
-            guild_id = str(interaction.guild.id)
-            new_view = LevelSettingsView(
-                interaction.user.id,
-                guild_id,
-                get_user_color_value(str(interaction.user.id)),
-                settings_message=interaction.message,
+                str(interaction.guild.id),
             )
             await interaction.response.edit_message(view=new_view)
 
         self.user_button.callback = open_user
         self.guild_button.callback = open_guild
-        self.channel_button.callback = open_channel_settings
-        self.economy_button.callback = open_economy_settings
-        self.level_button.callback = open_level_settings
 
         container = Container(
             TextDisplay(f"<:gear:1517576939097952496> **Settings for {self.username}**"),
             Separator(),
             Section("<:edit:1517497568421085256> User settings", accessory=self.user_button),
             Section("<:drawer:1517497564189036574> Guild settings", accessory=self.guild_button),
-            Section("<:list:1517497572770451567> Channel settings", accessory=self.channel_button),
-            Section("<:money:1517580310395486239> Economy settings", accessory=self.economy_button),
-            Section("<:chalice:1517579767573123092> Level settings", accessory=self.level_button),
             Separator(),
             TextDisplay("Found a bug ? Report it in the [support server](https://discord.gg/FSBPvc9zqY)"),
             accent_color=self.color,
@@ -5692,6 +7242,194 @@ class UserSettingsView(LayoutView):
         )
         self.add_item(container)
         self.add_item(discord.ui.ActionRow(self.color_select))
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class GuildSettingsMenuView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.color = get_user_color_value(str(user_id))
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.general_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_general",
+        )
+        self.channel_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_channel",
+        )
+        self.economy_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_economy",
+        )
+        self.level_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_level",
+        )
+        self.automod_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_automod",
+        )
+
+        async def open_general(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use guild settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_config, _ = get_guild_config(self.guild_id)
+            new_view = GuildSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                ghost_pings=guild_config.get("ghost_ping_enabled", False),
+                history_enabled=guild_config.get("edit_delete_history_enabled", True),
+                level_up_enabled=guild_config.get("level_up_message_enabled", False),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_channel_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use channel settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_channels:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Channels permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = ChannelSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_economy_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use economy settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = EconomySettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_level_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use level settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = LevelSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+                settings_message=interaction.message,
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_automod_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use automod settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = AutomodSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def back_callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+        self.general_button.callback = open_general
+        self.channel_button.callback = open_channel_settings
+        self.economy_button.callback = open_economy_settings
+        self.level_button.callback = open_level_settings
+        self.automod_button.callback = open_automod_settings
+
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="guild_settings_menu_back")
+        self.back_button.callback = back_callback
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Guild settings**"),
+            TextDisplay("Choose which guild section to configure."),
+            Separator(),
+            Section("<:edit:1517497568421085256> General settings", accessory=self.general_button),
+            Section("<:list:1517497572770451567> Channel settings", accessory=self.channel_button),
+            Section("<:money:1517580310395486239> Economy settings", accessory=self.economy_button),
+            Section("<:chalice:1517579767573123092> Level settings", accessory=self.level_button),
+            Section("<:warning:1517452174991556758> Automod settings", accessory=self.automod_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
         self.add_item(discord.ui.ActionRow(self.back_button))
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
@@ -5777,13 +7515,13 @@ class GuildSettingsView(LayoutView):
         self.back_button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="guild_settings_back")
 
         async def back_callback(interaction: discord.Interaction):
-            await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+            await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
         self.back_button.callback = back_callback
 
         container = Container(
-            TextDisplay("<:gear:1517576939097952496> **Guild settings**"),
-            TextDisplay("Adjust guild-wide behavior below."),
+            TextDisplay("<:gear:1517576939097952496> **General settings**"),
+            TextDisplay("Adjust general guild-wide behavior below."),
             Separator(),
             Section(f"<:ghost:1517497569939558470> Ghost pings: {'Enabled' if self.ghost_pings else 'Disabled'}", accessory=self.ghost_button),
             Section(f"<:trash:1517497581058527404> Edit/Delete history: {'Enabled' if self.history_enabled else 'Disabled'}", accessory=self.history_button),
@@ -6353,7 +8091,7 @@ class EconomySettingsView(LayoutView):
             pass
 
     async def handle_back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
     async def handle_shop_edit(self, interaction: discord.Interaction):
         settings_message = interaction.message
@@ -6430,12 +8168,12 @@ class EconomySettingsView(LayoutView):
             "give_item_amount": give_item_amount,
         }
         save_data(data)
-        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
         await interaction.response.send_message(
             f"<:approve:1517452125687513158> Use effect for **{item_name}** saved. Choose a role to grant when it is used. Press No to skip.",
             view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a role", item_name, settings_message, self.handle_use_role_selection, False),
             ephemeral=True,
         )
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
 
     async def handle_use_role_selection(self, interaction: discord.Interaction, role_id: int | None, item_name: str, settings_message: discord.Message | None, is_temp_role: bool):
         data = load_data()
@@ -6458,7 +8196,6 @@ class EconomySettingsView(LayoutView):
         if is_temp_role:
             effect["temp_role_id"] = role_id
             save_data(data)
-            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
             if role_id is None:
                 await interaction.response.send_message(
                     f"<:approve:1517452125687513158> Temp role setup skipped for **{item_name}**.",
@@ -6468,24 +8205,24 @@ class EconomySettingsView(LayoutView):
                 await interaction.response.send_modal(
                     EconomyTempRoleDurationModal(self.handle_temp_role_duration_submit, self.guild_id, item_name, settings_message)
                 )
+            await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
             return
 
         effect["role_id"] = role_id
         save_data(data)
-        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
         if role_id is None:
             await interaction.response.send_message(
                 f"<:approve:1517452125687513158> Role setup skipped for **{item_name}**. Choose a temporary role next, or press No to skip.",
                 view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
                 ephemeral=True,
             )
-            return
-
-        await interaction.response.send_message(
-            f"<:approve:1517452125687513158> Role saved for **{item_name}**. Choose a temporary role next, or press No to skip.",
-            view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
-            ephemeral=True,
-        )
+        else:
+            await interaction.response.send_message(
+                f"<:approve:1517452125687513158> Role saved for **{item_name}**. Choose a temporary role next, or press No to skip.",
+                view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
+                ephemeral=True,
+            )
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
 
     async def handle_temp_role_duration_submit(self, interaction: discord.Interaction, days: int, hours: int, minutes: int, seconds: int, item_name: str, settings_message: discord.Message | None):
         data = load_data()
@@ -6955,7 +8692,7 @@ class LevelSettingsView(LayoutView):
             pass
 
     async def handle_back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
     async def handle_set(self, interaction: discord.Interaction):
         await interaction.response.send_modal(LevelRewardModal(self.handle_reward_submit, self.guild_id, self.settings_message))
@@ -7010,6 +8747,367 @@ class LevelSettingsView(LayoutView):
         )
 
 
+class AutomodSettingsView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str, color: discord.Color):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.color = color
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        automod, _ = get_guild_automod_config(self.guild_id)
+        blocked_words = automod.get("blocked_words", [])
+        warning_sanctions = automod.get("warning_sanctions", [])
+        blocked_summary = "\n".join(f"- {item.get('phrase', '')}{' (regex)' if item.get('use_regex') else ''}" for item in blocked_words[:6]) or "None"
+        sanctions_summary = []
+        for item in warning_sanctions[:6]:
+            action = item.get('action', 'timeout')
+            display = f"{item.get('warns')} warns -> {action}"
+            if action == 'timeout':
+                duration = item.get('duration') or f"{item.get('duration_seconds', 0)}s"
+                display += f" ({duration})"
+            sanctions_summary.append(display)
+        sanctions_summary = "\n".join(sanctions_summary) or "None"
+
+        self.word_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="automod_word_edit")
+        self.sanctions_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="automod_sanctions_edit")
+        self.word_button.callback = self.handle_word_edit
+        self.sanctions_button.callback = self.handle_sanctions_edit
+
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="automod_settings_back")
+        self.back_button.callback = self.handle_back
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Automod settings**"),
+            TextDisplay("Manage blocked words and warning sanctions below."),
+            Separator(),
+            Section(f"<:warning:1517452174991556758> Blocked words\n{blocked_summary}", accessory=self.word_button),
+            Section(f"<:warning:1517452174991556758> Warning sanctions\n{sanctions_summary}", accessory=self.sanctions_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def handle_back(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
+
+    async def handle_word_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with blocked words?",
+            view=AutomodWordChoiceView(self.user_id, self.guild_id, self.open_word_add, self.open_word_remove, settings_message),
+            ephemeral=True,
+        )
+
+    async def open_word_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(AutomodWordAddModal(self.add_word_block, self.guild_id, settings_message))
+
+    async def open_word_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(AutomodWordRemoveModal(self.remove_word_block, self.guild_id, settings_message))
+
+    async def add_word_block(self, interaction: discord.Interaction, phrase: str, use_regex: bool, warn_on_match: bool, settings_message: discord.Message | None):
+        automod, data = get_guild_automod_config(self.guild_id)
+        automod.setdefault("blocked_words", []).append({"phrase": phrase, "use_regex": use_regex, "warn_on_match": warn_on_match})
+        save_guild_data(data)
+        await sync_guild_word_block_rule(self.guild_id)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Blocked phrase saved.", ephemeral=True)
+        await self.refresh_settings_message(interaction, AutomodSettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_word_block(self, interaction: discord.Interaction, phrase: str, settings_message: discord.Message | None):
+        automod, data = get_guild_automod_config(self.guild_id)
+        blocked_words = automod.get("blocked_words", [])
+        filtered = [item for item in blocked_words if str(item.get("phrase", "")).strip().lower() != phrase.strip().lower()]
+        if len(filtered) != len(blocked_words):
+            automod["blocked_words"] = filtered
+            save_guild_data(data)
+            await sync_guild_word_block_rule(self.guild_id)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Blocked phrase removed.", ephemeral=True)
+            await self.refresh_settings_message(interaction, AutomodSettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> No matching blocked phrase was found.", ephemeral=True)
+
+    async def handle_sanctions_edit(self, interaction: discord.Interaction):
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except Exception:
+                settings_message = None
+        await interaction.response.send_message(
+            "What would you like to do with warning sanctions?",
+            view=AutomodSanctionChoiceView(self.user_id, self.guild_id, self.open_sanction_add, self.open_sanction_remove, settings_message),
+            ephemeral=True,
+        )
+
+    async def open_sanction_add(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(AutomodSanctionAddModal(self.add_sanction_rule, self.guild_id, settings_message))
+
+    async def open_sanction_remove(self, interaction: discord.Interaction, settings_message: discord.Message | None = None):
+        await interaction.response.send_modal(AutomodSanctionRemoveModal(self.remove_sanction_rule, self.guild_id, settings_message))
+
+    async def add_sanction_rule(self, interaction: discord.Interaction, warns: int, action: str, duration_seconds: int, duration_text: str, settings_message: discord.Message | None):
+        automod, data = get_guild_automod_config(self.guild_id)
+        automod.setdefault("warning_sanctions", []).append({"warns": warns, "action": action, "duration_seconds": duration_seconds, "duration": duration_text})
+        save_guild_data(data)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Warning sanction saved.", ephemeral=True)
+        await self.refresh_settings_message(interaction, AutomodSettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
+    async def remove_sanction_rule(self, interaction: discord.Interaction, warns: int, settings_message: discord.Message | None):
+        automod, data = get_guild_automod_config(self.guild_id)
+        sanctions = automod.get("warning_sanctions", [])
+        filtered = [item for item in sanctions if int(item.get("warns", 0)) != warns]
+        if len(filtered) != len(sanctions):
+            automod["warning_sanctions"] = filtered
+            save_guild_data(data)
+            await interaction.response.send_message(f"<:trash:1517497581058527404> Warning sanction removed.", ephemeral=True)
+            await self.refresh_settings_message(interaction, AutomodSettingsView(self.user_id, self.guild_id, self.color), settings_message)
+        else:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> No matching warning sanction was found.", ephemeral=True)
+
+    async def refresh_settings_message(self, interaction: discord.Interaction, view: discord.ui.View, settings_message: discord.Message | None = None):
+        if settings_message is None:
+            settings_message = interaction.message
+            if settings_message is None:
+                try:
+                    settings_message = await interaction.original_response()
+                except (discord.NotFound, discord.HTTPException):
+                    settings_message = None
+        if settings_message is None:
+            return
+        try:
+            await settings_message.edit(view=view)
+            return
+        except (discord.NotFound, discord.HTTPException):
+            pass
+        try:
+            await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+            return
+        except Exception:
+            pass
+        try:
+            await interaction.edit_original_response(view=view)
+        except Exception:
+            pass
+
+
+class AutomodWordChoiceView(discord.ui.View):
+    def __init__(self, user_id: int, guild_id: str, on_add, on_remove, settings_message: discord.Message | None):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.on_add = on_add
+        self.on_remove = on_remove
+        self.settings_message = settings_message
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id="automod_word_add")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="automod_word_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="automod_word_cancel")
+        self.add_button.callback = self.add_callback
+        self.remove_button.callback = self.remove_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.add_button)
+        self.add_item(self.remove_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def add_callback(self, interaction: discord.Interaction):
+        await self.on_add(interaction, self.settings_message)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        await self.on_remove(interaction, self.settings_message)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        self.add_button.disabled = True
+        self.remove_button.disabled = True
+        self.cancel_button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+class AutomodWordAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add blocked phrase")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.phrase_input = TextInput(label="Word or phrase", placeholder="Enter a word or phrase", required=True, max_length=200)
+        self.regex_input = TextInput(label="Regex? (true/false)", placeholder="false", required=True, max_length=5)
+        self.warn_input = TextInput(label="Warn on match? (true/false)", placeholder="false", required=True, max_length=5)
+        self.add_item(self.phrase_input)
+        self.add_item(self.regex_input)
+        self.add_item(self.warn_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        def parse_bool(value: str) -> bool:
+            return value.strip().lower() in {"true", "yes", "y", "1"}
+
+        use_regex = parse_bool(self.regex_input.value)
+        warn_on_match = parse_bool(self.warn_input.value)
+        await self.callback(interaction, self.phrase_input.value.strip(), use_regex, warn_on_match, self.settings_message)
+
+
+class AutomodWordRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove blocked phrase")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.phrase_input = TextInput(label="Word or phrase", placeholder="Enter the phrase to remove", required=True, max_length=200)
+        self.add_item(self.phrase_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        await self.callback(interaction, self.phrase_input.value.strip(), self.settings_message)
+
+
+class AutomodSanctionChoiceView(discord.ui.View):
+    def __init__(self, user_id: int, guild_id: str, on_add, on_remove, settings_message: discord.Message | None):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.on_add = on_add
+        self.on_remove = on_remove
+        self.settings_message = settings_message
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id="automod_sanction_add")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="automod_sanction_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="automod_sanction_cancel")
+        self.add_button.callback = self.add_callback
+        self.remove_button.callback = self.remove_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.add_button)
+        self.add_item(self.remove_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def add_callback(self, interaction: discord.Interaction):
+        await self.on_add(interaction, self.settings_message)
+
+    async def remove_callback(self, interaction: discord.Interaction):
+        await self.on_remove(interaction, self.settings_message)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        self.add_button.disabled = True
+        self.remove_button.disabled = True
+        self.cancel_button.disabled = True
+        await interaction.response.edit_message(view=self)
+
+
+class AutomodSanctionAddModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Add warning sanction")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.warns_input = TextInput(label="Warn count", placeholder="5", required=True, max_length=10)
+        self.action_input = TextInput(label="Action (timeout/kick/ban)", placeholder="timeout", required=True, max_length=20)
+        self.duration_input = TextInput(label="Timeout duration (1d, 10s, 50m)", placeholder="1d", required=False, max_length=20)
+        self.add_item(self.warns_input)
+        self.add_item(self.action_input)
+        self.add_item(self.duration_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            warns = int(self.warns_input.value)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Warn count must be a number.", ephemeral=True)
+            return
+
+        action = self.action_input.value.strip().lower()
+        if action not in {"timeout", "kick", "ban"}:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Action must be timeout, kick, or ban.", ephemeral=True)
+            return
+
+        duration_text = self.duration_input.value.strip() if self.duration_input.value else ""
+        duration_seconds = None
+        if action == "timeout":
+            if not duration_text:
+                duration_text = "1d"
+            duration_seconds = parse_duration_to_seconds(duration_text)
+            if duration_seconds is None or duration_seconds <= 0:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Timeout duration must be a valid value like 1d, 10s, or 50m.", ephemeral=True)
+                return
+        else:
+            duration_seconds = 0
+            if duration_text:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Duration is only valid for timeout actions.", ephemeral=True)
+                return
+
+        await self.callback(interaction, warns, action, duration_seconds, duration_text, self.settings_message)
+
+
+class AutomodSanctionRemoveModal(Modal):
+    def __init__(self, callback, guild_id: str, settings_message: discord.Message | None):
+        super().__init__(title="Remove warning sanction")
+        self.callback = callback
+        self.guild_id = guild_id
+        self.settings_message = settings_message
+        self.warns_input = TextInput(label="Warn count", placeholder="5", required=True, max_length=10)
+        self.add_item(self.warns_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        try:
+            warns = int(self.warns_input.value)
+        except ValueError:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Warn count must be a number.", ephemeral=True)
+            return
+        await self.callback(interaction, warns, self.settings_message)
+
+
+class HoneypotSanctionModal(Modal):
+    def __init__(self, callback, channel: discord.abc.GuildChannel, settings_message: discord.Message | None):
+        super().__init__(title="Set honeypot sanction")
+        self.callback = callback
+        self.channel = channel
+        self.settings_message = settings_message
+        self.action_input = TextInput(label="Action (timeout/kick/ban)", placeholder="timeout", required=True, max_length=20)
+        self.duration_input = TextInput(label="Timeout duration (1d, 10s, 50m)", placeholder="1d", required=False, max_length=20)
+        self.add_item(self.action_input)
+        self.add_item(self.duration_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        action = self.action_input.value.strip().lower()
+        if action not in {"timeout", "kick", "ban"}:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Action must be timeout, kick, or ban.", ephemeral=True)
+            return
+
+        duration_text = self.duration_input.value.strip() if self.duration_input.value else ""
+        duration_seconds = None
+        if action == "timeout":
+            if not duration_text:
+                duration_text = "1d"
+            duration_seconds = parse_duration_to_seconds(duration_text)
+            if duration_seconds is None or duration_seconds <= 0:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Timeout duration must be a valid value like 1d, 10s, or 50m.", ephemeral=True)
+                return
+        else:
+            duration_seconds = 0
+            if duration_text:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Duration is only valid for timeout actions.", ephemeral=True)
+                return
+
+        await self.callback(interaction, self.channel, action, duration_seconds, duration_text, self.settings_message)
+
+
 class ChannelSettingsView(LayoutView):
     def __init__(self, user_id: int, guild_id: str, color: discord.Color, page: int = 1):
         super().__init__(timeout=180)
@@ -7036,17 +9134,28 @@ class ChannelSettingsView(LayoutView):
         board_entries = get_guild_board_entries(self.guild_id)
         counter_entries = get_guild_counter_entries(guild) if guild else []
         locked_entries = get_locked_channel_mentions(guild) if guild else []
+        honeypot_channel = format_channel_reference(guild, guild_config.get("honeypot_channel_id")) if guild else "None"
+        honeypot_sanction = guild_config.get("honeypot_sanction") or {}
+        honeypot_action = str(honeypot_sanction.get("action", "timeout")).lower()
+        honeypot_duration = str(honeypot_sanction.get("duration", "") or "")
+        if honeypot_action == "timeout":
+            honeypot_summary = f"Timeout ({honeypot_duration or '1d'})"
+        else:
+            honeypot_summary = honeypot_action.title() if honeypot_action in {"kick", "ban"} else "None"
+        honeypot_value = f"{honeypot_channel}\nSanction: {honeypot_summary}" if guild_config.get("honeypot_channel_id") else f"{honeypot_channel}\nSanction: None"
 
         if self.page == 1:
             self.welcome_button = Button(label="Remove" if guild_config.get("welcome_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_welcome_toggle")
             self.goodbye_button = Button(label="Remove" if guild_config.get("goodbye_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_goodbye_toggle")
             self.level_button = Button(label="Remove" if level_id else "Set", style=discord.ButtonStyle.primary, custom_id="channel_level_toggle")
             self.admin_button = Button(label=admin_label, style=discord.ButtonStyle.primary, custom_id="channel_admin_toggle")
+            self.honeypot_button = Button(label="Remove" if guild_config.get("honeypot_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_honeypot_toggle")
 
             self.welcome_button.callback = self.handle_welcome_toggle
             self.goodbye_button.callback = self.handle_goodbye_toggle
             self.level_button.callback = self.handle_level_toggle
             self.admin_button.callback = self.handle_admin_toggle
+            self.honeypot_button.callback = self.handle_honeypot_toggle
 
             page_button = Button(label="Page 2", style=discord.ButtonStyle.secondary, custom_id="channel_settings_next")
             page_button.callback = self.open_page_two
@@ -7077,6 +9186,7 @@ class ChannelSettingsView(LayoutView):
                 Section(f"<:minus:1518348754111959150> Goodbye Channel\n{goodbye_channel}", accessory=self.goodbye_button),
                 Section(f"<:chalice:1517579767573123092> Level-up Announce Channel\n{level_channel}", accessory=self.level_button),
                 Section(f"<:unlocked:1517574880034558102> Admin Log Channel\n{admin_value}", accessory=self.admin_button),
+                Section(f"<:honey:1524116282075512842> Honeypot Channel\n{honeypot_value}", accessory=self.honeypot_button),
             ]
         else:
             board_text = "\n".join(board_entries) if board_entries else "None"
@@ -7126,7 +9236,7 @@ class ChannelSettingsView(LayoutView):
             pass
 
     async def handle_back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
     async def handle_close(self, interaction: discord.Interaction):
         for item in self.children:
@@ -7409,6 +9519,57 @@ class ChannelSettingsView(LayoutView):
             ephemeral=True,
         )
 
+    async def handle_honeypot_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        guild_config, _ = get_guild_config(self.guild_id)
+        if guild_config.get("honeypot_channel_id"):
+            await interaction.response.send_message("Please confirm removal of the honeypot channel.", view=ConfirmRemoveView(self.user_id, self.confirm_remove_honeypot, interaction.message), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the honeypot channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select honeypot channel", self.open_honeypot_sanction, interaction.message),
+            ephemeral=True,
+        )
+
+    async def open_honeypot_sanction(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        resolved_channel = channel
+        if interaction.guild and getattr(channel, "id", None):
+            resolved_channel = interaction.guild.get_channel(channel.id) or await interaction.guild.fetch_channel(channel.id)
+        if not resolved_channel or getattr(resolved_channel, "type", None) != discord.ChannelType.text:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> Please select a text channel for the honeypot.", ephemeral=True)
+        await interaction.response.send_modal(HoneypotSanctionModal(self.set_honeypot_channel, resolved_channel, settings_message))
+
+    async def set_honeypot_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, action: str, duration_seconds: int, duration_text: str, settings_message: discord.Message):
+        resolved_channel = channel
+        if interaction.guild and getattr(channel, "id", None):
+            resolved_channel = interaction.guild.get_channel(channel.id) or await interaction.guild.fetch_channel(channel.id)
+
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["honeypot_channel_id"] = getattr(resolved_channel, "id", channel.id)
+        guild_config["honeypot_sanction"] = {
+            "action": action,
+            "duration_seconds": duration_seconds,
+            "duration": duration_text,
+        }
+        save_guild_data(data)
+        try:
+            if resolved_channel and hasattr(resolved_channel, "send"):
+                await resolved_channel.send(f"<:honey:1524116282075512842> This channel is a honeypot. Please do not send messages here. Any message sent here will trigger a sanction.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await safe_send(interaction, f"<:approve:1517452125687513158> Honeypot channel set to {getattr(resolved_channel, 'mention', str(channel.id))}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_honeypot(self, interaction: discord.Interaction, original_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["honeypot_channel_id"] = None
+        guild_config["honeypot_sanction"] = {}
+        save_guild_data(data)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send("<:trash:1517497581058527404> Honeypot channel has been removed.", ephemeral=True)
+
     async def open_locked_add(self, interaction: discord.Interaction, settings_message: discord.Message):
         guild = interaction.guild
         if not guild:
@@ -7460,4 +9621,59 @@ async def settings(interaction: discord.Interaction):
 
 
 # -------------------------------------------------------------------------------------------------------------
+#                                               Backup BECAUSE IT KEEPS RESETTING THE FILES OMFG IM TIRED OF THIS
+# -------------------------------------------------------------------------------------------------------------
+
+
+def create_backup(root_dir: str = BASE_DIR, backup_folder_name: str = 'backups') -> Path:
+    root = Path(root_dir)
+    backup_dir = root / backup_folder_name
+    try:
+        backup_dir.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+
+    now = datetime.now()
+    name = now.strftime("%y.%m.%d.h%H.%M")
+    zip_path = backup_dir / f"{name}.zip"
+
+    try:
+        with zipfile.ZipFile(zip_path, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+            for p in root.rglob('*.json'):
+                if p.is_file():
+                    try:
+                        arcname = p.relative_to(root).as_posix()
+                    except Exception:
+                        arcname = p.name
+                    zf.write(p, arcname)
+        print(f"Created JSON backup: {zip_path}")
+    except Exception as e:
+        print(f"Failed to create backup {zip_path}: {e}")
+
+    return zip_path
+
+
+def _backup_worker(interval_seconds: int = 3600, root_dir: str = BASE_DIR):
+    while True:
+        time.sleep(interval_seconds)
+        try:
+            create_backup(root_dir)
+        except Exception as e:
+            print(f"Backup error: {e}")
+
+
+def start_backup_scheduler(interval_seconds: int = 3600, root_dir: str = BASE_DIR):
+    try:
+        create_backup(root_dir)
+    except Exception as e:
+        print(f"Initial backup failed: {e}")
+
+    t = threading.Thread(target=_backup_worker, args=(interval_seconds, root_dir), daemon=True)
+    t.start()
+    return t
+
+
+
+start_backup_scheduler()
+
 bot.run(TOKEN)
