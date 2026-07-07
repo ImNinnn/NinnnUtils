@@ -1,6 +1,7 @@
 from discord.ext.commands import Cog, Context, hybrid_group
 from discord import app_commands, Embed, Color
-import asyncio, aiohttp
+import asyncio, aiohttp, discord
+from deep_translator import GoogleTranslator
 
 async def setup(bot):
     await bot.add_cog(Languages(bot))
@@ -12,12 +13,13 @@ class Languages(Cog):
     @hybrid_group(name="language", description="Language utilities", invoke_without_command=True)
     async def l(self, ctx): pass
 
-    @bot.tree.command(name="definition", description="Look up the dictionary definition of a word")
+    @l.command(name="definition", description="Look up the dictionary definition of a word")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(word="The word you want to define")
-    async def define_word(interaction: discord.Interaction, word: str):
-        await interaction.response.defer()
+    async def define_word(self, ctx: Context, word: str):
+        if ctx.interaction:
+            await ctx.interaction.response.defer()
         
         clean_word = word.strip().lower()
         url = f"https://api.dictionaryapi.dev/api/v2/entries/en/{clean_word}"
@@ -27,13 +29,13 @@ class Languages(Cog):
                 async with session.get(url) as response:
                     
                     if response.status == 404:
-                        return await interaction.followup.send(
+                        return await ctx.send(
                             f"<:dissaprouve:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!", 
                             ephemeral=True
                         )
                     
                     if response.status != 200:
-                        return await interaction.followup.send(
+                        return await ctx.send(
                             "<:warning:1517452174991556758> The dictionary service is currently unavailable. Please try again later.", 
                             ephemeral=True
                         )
@@ -70,13 +72,13 @@ class Languages(Cog):
                     
             embed.set_footer(text="Data sourced from Wiktionary API")
             
-            await interaction.followup.send(embed=embed)
+            await ctx.send(embed=embed)
             
         except Exception as e:
             print(f"Error executing /def command: {e}")
-            await interaction.followup.send("<:dissaprouve:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
+            await ctx.send("<:dissaprouve:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
 
-    @bot.tree.command(name="translate", description="Translate text into another language")
+    @l.command(name="translate", description="Translate text into another language")
     @app_commands.allowed_installs(guilds=True, users=True)
     @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
     @app_commands.describe(
@@ -84,11 +86,12 @@ class Languages(Cog):
         to_language="The language code to translate into (e.g., 'en', 'es', 'fr', 'ja')",
         from_language="Optional: Specify the original language code (defaults to auto-detect)"
     )
-    async def translate(interaction: discord.Interaction, text: str, to_language: str = "en", from_language: str = "auto"):
-        await interaction.response.defer(ephemeral=False)
+    async def translate(self, ctx: Context, text: str, to_language: str = "en", from_language: str = "auto"):
+        if ctx.interaction:
+            await ctx.interaction.response.defer(ephemeral=False)
         try:
             translator = GoogleTranslator(source=from_language, target=to_language)
             translated_text = translator.translate(text)
-            await interaction.followup.send(content=translated_text)
+            await ctx.send(content=translated_text)
         except Exception as e:
-            await interaction.followup.send(f"<:disapprove:1517452151012589662> Translation failed. Please ensure you used valid ISO language codes! Error: {e}", ephemeral=True)
+            await ctx.send(f"<:disapprove:1517452151012589662> Translation failed. Please ensure you used valid ISO language codes! Error: {e}", ephemeral=True)

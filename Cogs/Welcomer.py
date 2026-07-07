@@ -1,4 +1,8 @@
+import discord
 from discord.ext.commands import Cog, Context, hybrid_group
+from Shared.Guilds import *
+from Shared.User import *
+from Shared.Errors import *
 
 async def setup(bot):
     await bot.add_cog(Welcomer(bot))
@@ -7,8 +11,8 @@ class Welcomer(Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @bot.event
-    async def on_member_join(member):
+    @Cog.listener()
+    async def on_member_join(self, member):
         guild_config, _ = get_guild_config(str(member.guild.id))
         channel_id = guild_config.get("welcome_channel_id")
         if channel_id:

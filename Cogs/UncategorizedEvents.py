@@ -1,5 +1,10 @@
 from discord.ext.commands import Cog
+import discord, traceback
+from Shared.Errors import *
+from discord import app_commands
 from main import NinnnUtils
+from .RPC import RPC
+from .Blacklist import Blacklist
 
 async def setup(bot):
     await bot.add_cog(UnEvents(bot))
@@ -11,6 +16,8 @@ class UnEvents(Cog):
     @Cog.listener()
     async def cog_load(self):
         await self.bot.wait_until_ready()
+        cog: RPC = self.bot.get_cog("RPC")
+        blk: Blacklist = self.bot.get_cog("Blacklist")
         shard_info = (
             f"{len(self.bot.shards)} shard(s), IDs {list(self.bot.shards.keys())}"
             if self.bot.shards
@@ -18,14 +25,14 @@ class UnEvents(Cog):
         )
         print(f"Logged in as {self.bot.user} (ID: {self.bot.user.id}) - {shard_info}")
         print(f"Serving {len(self.bot.guilds)} guild(s)")
-        if not update_presence.is_running():
-            update_presence.start()
+        if not cog.update_presence.is_running():
+            cog.update_presence.start()
         if not voice_xp_tracker.is_running():
             voice_xp_tracker.start()
-        bot.loop.create_task(blacklist_startup_cleanup())
+        self.bot.loop.create_task(blk.blacklist_startup_cleanup())
 
-    @bot.tree.error
-    async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    @Cog.listener()
+    async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
         original_error = getattr(error, "original", error)
         bot_missing_permissions_error = getattr(app_commands, "BotMissingPermissions", None)
 
