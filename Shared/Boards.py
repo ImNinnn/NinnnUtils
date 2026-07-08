@@ -1,16 +1,17 @@
 import discord
 
 from LowerLeveled.jsonutils import load_json_file, save_json_file
+from Shared.DataManager import DataManager
 from Shared.Errors import add_bot_error_entry
 from main import BOARD_FILE
 
 
 def load_board_data():
-    return load_json_file(BOARD_FILE, {})
+    return DataManager.load(BOARD_FILE, {})
 
 
 def save_board_data(data):
-    save_json_file(BOARD_FILE, data)
+    DataManager.save(BOARD_FILE, data)
 
 def get_guild_board_entries(guild_id: str) -> list[str]:
     board_data = load_board_data()
@@ -30,7 +31,7 @@ def ensure_board_guild_config(guild_id: str):
         board_data[guild_id] = {}
     return board_data
 
-async def update_board(payload, emoji_str, remove_mode=False):
+async def update_board(bot, payload, emoji_str, remove_mode=False):
     guild_id = str(payload.guild_id)
     board_data = load_board_data()
 

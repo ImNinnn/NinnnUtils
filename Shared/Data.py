@@ -1,10 +1,11 @@
-from LowerLeveled.jsonutils import load_json_file, save_json_file
+from Shared.DataManager import DataManager
 from main import DATA_FILE
 
 
 def load_data():
-    return load_json_file(DATA_FILE, {})
+    return DataManager.load(DATA_FILE, {})
+
 
 
 def save_data(data):
-    save_json_file(DATA_FILE, data)
+    DataManager.save(DATA_FILE, data)

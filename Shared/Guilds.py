@@ -1,15 +1,16 @@
 import discord
 
 from LowerLeveled.jsonutils import load_json_file, save_json_file
+from Shared.DataManager import DataManager
 from main import GUILD_FILE
 
 
 def load_guild_data():
-    return load_json_file(GUILD_FILE, {})
+    return DataManager.load(GUILD_FILE, {})
 
 
 def save_guild_data(data):
-    save_json_file(GUILD_FILE, data)
+    DataManager.save(GUILD_FILE, data)
 
 def get_guild_config(guild_id: str) -> dict:
     data = load_guild_data()
@@ -19,7 +20,9 @@ def get_guild_config(guild_id: str) -> dict:
         "ghost_ping_enabled": False,
         "edit_delete_history_enabled": True,
         "level_up_message_enabled": False,
-        "counter_channels": {}
+        "counter_channels": {},
+        "honeypot_channel_id": None,
+        "honeypot_sanction": {}
     }
 
     if guild_id not in data:

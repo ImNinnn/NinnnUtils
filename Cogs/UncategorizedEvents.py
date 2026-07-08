@@ -1,8 +1,16 @@
+import random
+
 from discord.ext.commands import Cog
 import discord, traceback
+
+from Shared.Cache import clean_cache
+from Shared.Counters import handle_counter_message
 from Shared.Errors import *
 from discord import app_commands
-from main import NinnnUtils
+
+from Shared.Fun import load_fun_data
+from Shared.Leveling import add_xp
+from main import NinnnUtils, locked_channels, admin_log_channels, server_pauses, all_paused_guilds, message_cache
 from .RPC import RPC
 from .Blacklist import Blacklist
 
@@ -27,8 +35,11 @@ class UnEvents(Cog):
         print(f"Serving {len(self.bot.guilds)} guild(s)")
         if not cog.update_presence.is_running():
             cog.update_presence.start()
-        if not voice_xp_tracker.is_running():
-            voice_xp_tracker.start()
+
+        voice = self.bot.get_cog("Music")
+
+        if not voice.voice_xp_tracker.is_running():
+            voice.voice_xp_tracker.start()
         self.bot.loop.create_task(blk.blacklist_startup_cleanup())
 
     @Cog.listener()
@@ -75,3 +86,77 @@ class UnEvents(Cog):
             print("".join(traceback.format_exception(type(original_error), original_error, original_error.__traceback__)))
             if not interaction.response.is_done():
                 await interaction.response.send_message("<:disapprove:1517452151012589662> An unexpected error occurred while executing this command.", ephemeral=True)
+
+    @Cog.listener()
+    async def on_message(self, message):
+        if message.author.bot:
+            return
+
+        if message.guild and message.channel.id in locked_channels:
+            guild_id = message.guild.id
+
+            for log_id in admin_log_channels:
+                log_channel = self.bot.get_channel(log_id)
+                if log_channel and log_channel.guild.id == guild_id:
+                    try:
+                        await log_channel.send(f"**[LOCKED]** `{message.author}`: {message.content}")
+                    except discord.Forbidden as error:
+                        add_bot_error_entry(guild_id, log_id, message.author, "locked channel admin log", error)
+                    except Exception:
+                        pass
+
+            current_pauses = server_pauses.get(guild_id, set())
+            if guild_id in all_paused_guilds or message.channel.id in current_pauses:
+                return
+
+            dots = "•" * min(max(len(message.content), 1), 200)
+            try:
+                await message.delete()
+                await message.channel.send(f"<:locked:1517574877257924809> {dots}")
+            except discord.Forbidden as error:
+                add_bot_error_entry(guild_id, message.channel.id, message.author, "locked channel notice", error)
+            except Exception:
+                pass
+            return
+
+        global message_cache
+        clean_cache()
+
+        media_url = message.attachments[0].url if message.attachments else None
+        now = datetime.now(timezone.utc)
+        message_cache.append({
+            'id': message.id,
+            'channel': message.channel.id,
+            'author': message.author,
+            'content': message.content,
+            'media': media_url,
+            'mentions': message.mentions,
+            'time': now,
+            'created_at': now
+        })
+
+        if message.guild:
+            guild_id = str(message.guild.id)
+            fun_data = load_fun_data()
+            if guild_id in fun_data:
+                guild_replies = fun_data[guild_id]
+                message_words = message.content.lower().split()
+                for trigger in guild_replies:
+                    if trigger in message_words:
+                        response = random.choice(guild_replies[trigger])
+                        try:
+                            await message.reply(response)
+                        except discord.Forbidden as error:
+                            add_bot_error_entry(message.guild.id, message.channel.id, message.author,
+                                                f"auto-reply: {trigger}", error)
+                        except Exception as error:
+                            add_bot_error_entry(message.guild.id, message.channel.id, message.author,
+                                                f"auto-reply: {trigger}", error)
+                        break
+
+            if await handle_counter_message(message):
+                return
+
+            await add_xp(self.bot, message.author, message.guild, random.randint(5, 10), announce_channel=message.channel)
+
+        await self.bot.process_commands(message)

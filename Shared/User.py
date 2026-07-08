@@ -1,17 +1,18 @@
 import discord
 
 from LowerLeveled.jsonutils import load_json_file, save_json_file
+from Shared.DataManager import DataManager
 from Shared.Guilds import get_guild_data
 from Shared.Leveling import load_levels
 from main import USER_FILE
 
 
 def load_user_settings():
-    return load_json_file(USER_FILE, {})
+    return DataManager.load(USER_FILE, {})
 
 
 def save_user_settings(data):
-    save_json_file(USER_FILE, data)
+    DataManager.save(USER_FILE, data)
 
 def get_user_settings_entry(settings: dict, user_id: str) -> dict:
     if "users" not in settings or not isinstance(settings["users"], dict):
@@ -43,14 +44,8 @@ def get_user_has_leveled_up_before(user_id: str) -> bool:
     if "has_leveled_up_before" in user_settings:
         return bool(user_settings["has_leveled_up_before"])
 
-    levels_data = load_levels()
-    for guild_data in levels_data.values():
-        users = guild_data.get("users", {})
-        user_data = users.get(str(user_id))
-        if isinstance(user_data, dict) and user_data.get("level", 0) > 0:
-            user_settings["has_leveled_up_before"] = True
-            save_user_settings(settings)
-            return True
+    user_settings["has_leveled_up_before"] = False
+    save_user_settings(settings)
 
     return False
 

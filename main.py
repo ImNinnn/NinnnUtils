@@ -23,6 +23,7 @@ raw_blacklist = os.getenv('SERVER_BLACKLIST', '')
 BLACKLISTED_GUILDS = [int(sid.strip()) for sid in raw_blacklist.split(',') if sid.strip().isdigit()]
 ACTIVITY_TEXT = os.getenv('ACTIVITY')
 SHARD_COUNT = int(os.getenv('SHARD_COUNT', '0'))
+PREFIX = os.getenv('PREFIX')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'economy.json')
@@ -34,7 +35,7 @@ LOCK_CONFIG_FILE = os.path.join(BASE_DIR, 'lock_config.json')
 FFMPEG_PATH = os.path.join(BASE_DIR, "ffmpeg.exe")
 LEVEL_FILE = os.path.join(BASE_DIR, 'level.json')
 USER_FILE = os.path.join(BASE_DIR, 'user.json')
-
+GIVEAWAY_FILE = os.path.join(BASE_DIR, 'giveaway.json')
 
 
 
@@ -48,7 +49,7 @@ USER_FILE = os.path.join(BASE_DIR, 'user.json')
 class NinnnUtils(commands.AutoShardedBot):
     def __init__(self, intents, shard_count: int = 0):
         super().__init__(
-            command_prefix="n!",
+            command_prefix=PREFIX,
             intents=intents,
             shard_count=shard_count or None,
         )
@@ -129,78 +130,6 @@ locked_channels, admin_log_channels = load_lock_config()
 # -------------------------------------------------------------------------------------------------------------
 #                                               Events
 # -------------------------------------------------------------------------------------------------------------
-
-@bot.event
-async def on_message(message):
-    if message.author.bot:
-        return
-
-    if message.guild and message.channel.id in locked_channels:
-        guild_id = message.guild.id
-
-        for log_id in admin_log_channels:
-            log_channel = bot.get_channel(log_id)
-            if log_channel and log_channel.guild.id == guild_id:
-                try:
-                    await log_channel.send(f"**[LOCKED]** `{message.author}`: {message.content}")
-                except discord.Forbidden as error:
-                    add_bot_error_entry(guild_id, log_id, message.author, "locked channel admin log", error)
-                except Exception:
-                    pass
-
-        current_pauses = server_pauses.get(guild_id, set())
-        if guild_id in all_paused_guilds or message.channel.id in current_pauses:
-            return
-
-        dots = "•" * min(max(len(message.content), 1), 200)
-        try:
-            await message.delete()
-            await message.channel.send(f"<:locked:1517574877257924809> {dots}")
-        except discord.Forbidden as error:
-            add_bot_error_entry(guild_id, message.channel.id, message.author, "locked channel notice", error)
-        except Exception:
-            pass
-        return
-
-    global message_cache
-    clean_cache()
-
-    media_url = message.attachments[0].url if message.attachments else None
-    now = datetime.now(timezone.utc)
-    message_cache.append({
-        'id': message.id,
-        'channel': message.channel.id,
-        'author': message.author,
-        'content': message.content,
-        'media': media_url,
-        'mentions': message.mentions,
-        'time': now,
-        'created_at': now
-    })
-
-    if message.guild:
-        guild_id = str(message.guild.id)
-        fun_data = load_fun_data()
-        if guild_id in fun_data:
-            guild_replies = fun_data[guild_id]
-            message_words = message.content.lower().split()
-            for trigger in guild_replies:
-                if trigger in message_words:
-                    response = random.choice(guild_replies[trigger])
-                    try:
-                        await message.reply(response)
-                    except discord.Forbidden as error:
-                        add_bot_error_entry(message.guild.id, message.channel.id, message.author, f"auto-reply: {trigger}", error)
-                    except Exception as error:
-                        add_bot_error_entry(message.guild.id, message.channel.id, message.author, f"auto-reply: {trigger}", error)
-                    break
-
-        if await handle_counter_message(message):
-            return
-
-        await add_xp(message.author, message.guild, random.randint(5, 10), announce_channel=message.channel)
-
-    await bot.process_commands(message)
 
 # -------------------------------------------------------------------------------------------------------------
 #                                               Error Handling
@@ -300,43 +229,7 @@ COLOR_EMOJIS = {
 #                                               Personalization Commands
 # -------------------------------------------------------------------------------------------------------------
 
-
-
-
 USER_COLOR_OPTIONS = [name for name in COLOR_EMOJIS.keys() if name != "black"]
-
-def validate_role_selection(interaction: discord.Interaction, role: discord.Role | None, role_label: str) -> str | None:
-    if role is None:
-        return None
-    if not guild_owner_bypasses_role_checks(interaction) and interaction.user.top_role <= role:
-        return f"<:disapprove:1517452151012589662> You cannot configure a {role_label} that is equal or higher than your highest role."
-    if interaction.guild.me.top_role <= role:
-        return "<:disapprove:1517452151012589662> I cannot assign that role because it is equal or higher than my highest role."
-    return None
-
-def parse_item_amount_entry(value: str, default_amount: int = 1):
-    text = (value or "").strip()
-    if not text:
-        return None, default_amount
-    if ":" in text:
-        name, amount_text = text.rsplit(":", 1)
-        try:
-            amount = int(amount_text.strip() or default_amount)
-        except ValueError:
-            amount = default_amount
-        return (name.strip() or None), amount
-    return text, default_amount
-
-@bot.tree.command(name="settings", description="Open a quick settings menu for your personal and guild preferences")
-@app_commands.allowed_installs(guilds=True, users=True)
-@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
-async def settings(interaction: discord.Interaction):
-    view = SettingsMenuView(
-        interaction.user.id,
-        interaction.user.display_name,
-        get_user_color_value(str(interaction.user.id)),
-    )
-    await interaction.response.send_message(view=view, ephemeral=True)
 
 # -------------------------------------------------------------------------------------------------------------
 if __name__ == "__main__":
@@ -344,5 +237,7 @@ if __name__ == "__main__":
     intents.message_content = True
     intents.members = True
     intents.presences = True
+    intents.auto_moderation_execution = True
+
     bot = NinnnUtils(intents=intents, shard_count=SHARD_COUNT)
     bot.run(TOKEN)

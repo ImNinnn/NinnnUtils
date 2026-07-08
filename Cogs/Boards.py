@@ -1,9 +1,12 @@
 from discord.ext.commands import Cog, Context, hybrid_group
 from datetime import datetime, timezone
-from Shared.Boards import *
+
+from Shared.Boards import load_board_data, save_board_data
 from Shared.Errors import *
 import discord
 import random
+
+from Shared.Leveling import add_xp
 from main import reaction_xp_cooldowns
 
 async def setup(bot):
@@ -29,12 +32,12 @@ class Boards(Cog):
             last_xp = reaction_xp_cooldowns.get(cooldown_key)
             if not last_xp or (now - last_xp).total_seconds() >= 15:
                 reaction_xp_cooldowns[cooldown_key] = now
-                await add_xp(reactor, guild, random.randint(1, 3), announce_channel=guild.get_channel(payload.channel_id))
+                await add_xp(self.bot, reactor, guild, random.randint(1, 3), announce_channel=guild.get_channel(payload.channel_id))
             try:
                 channel = guild.get_channel(payload.channel_id)
                 message = await channel.fetch_message(payload.message_id)
                 if message.author and not message.author.bot and message.author.id != payload.user_id:
-                    await add_xp(message.author, guild, random.randint(3, 5), announce_channel=channel)
+                    await add_xp(self.bot, message.author, guild, random.randint(3, 5), announce_channel=channel)
             except discord.Forbidden as error:
                 add_bot_error_entry(payload.guild_id, payload.channel_id, None, "reaction xp source fetch", error)
             except Exception:
