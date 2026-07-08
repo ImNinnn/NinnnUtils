@@ -1,4 +1,4 @@
-from discord.ext.commands import Cog, Context, hybrid_group
+from discord.ext.commands import Cog, Context, hybrid_group, has_permissions
 from discord import app_commands
 from main import YTDL_OPTIONS
 import yt_dlp
@@ -12,8 +12,14 @@ class Music(Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @hybrid_group(name="music", description="Music commands", invoke_without_command=True)
+    @hybrid_group(name="voice", description="Voice commands", invoke_without_command=True)
     async def v(self, ctx): pass
+
+    @v.group(name="music", description="Music commands", invoke_without_command = True)
+    async def m(self, ctx): pass
+
+    @v.group(name="admin", description="Admin voice management commands", invoke_without_command=True)
+    async def a(self, ctx): pass
 
     @Cog.listener()
     async def on_voice_state_update(member, before, after):
@@ -48,7 +54,7 @@ class Music(Cog):
         else:
             await ctx.send("<:disapprove:1517452151012589662> I'm not connected to a voice channel!", ephemeral=True)
 
-    @v.command(name="play", description="Play a song from YouTube")
+    @m.command(name="play", description="Play a song from YouTube")
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.describe(
         youtube_url="The YouTube video link (required for add)"
@@ -110,7 +116,7 @@ class Music(Cog):
 
         # if action == "remove":
 
-    @v.command(name="skip", description="Skip the current song")
+    @m.command(name="skip", description="Skip the current song")
     async def skip(self, ctx: Context):
         voice_client = ctx.guild.voice_client
         guild_id = str(ctx.guild.id)
@@ -157,7 +163,7 @@ class Music(Cog):
             if current.lower() in song.get("title", "").lower()
         ][:25]
 
-    @v.command(name="remove", description="Remove a song from the queue")
+    @m.command(name="remove", description="Remove a song from the queue")
     @app_commands.autocomplete(position=remove_autocomplete)
     @app_commands.describe(position="The track for removal (or the position)")
     async def remove(self, ctx: Context, position: int):
@@ -197,3 +203,50 @@ class Music(Cog):
 
         await ctx.send(f"Removed **{removed['title']}** from the queue.")
         return
+
+    @a.command(name="move",
+                      description="Move everyone in your current voice channel to another voice channel")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.default_permissions(move_members=True)
+    @app_commands.describe(
+        channel="Target voice channel to move everyone into"
+    )
+    @has_permissions(move_members=True)
+    async def adm_voice_move(self, ctx: Context, channel: discord.VoiceChannel):
+        member = ctx.author
+        if not isinstance(member, discord.Member):
+            member = ctx.guild.get_member(ctx.author.id)
+
+        if not member or not member.voice or not member.voice.channel:
+            await ctx.send(
+                "<:disapprove:1517452151012589662> You must be connected to a voice channel to use this command.",
+                ephemeral=True)
+            return
+
+        source_channel = member.voice.channel
+        if source_channel.id == channel.id:
+            await ctx.send(
+                "<:approve:1517452125687513158> You are already in the target voice channel.", ephemeral=True)
+            return
+
+        moved_members = []
+        failed_members = []
+        for target_member in list(source_channel.members):
+            try:
+                await target_member.move_to(channel, reason=f"Voice move initiated by {ctx.author}")
+                moved_members.append(target_member.display_name)
+            except Exception as e:
+                failed_members.append(f"{target_member.display_name}: {e}")
+
+        embed = discord.Embed(
+            title="Voice Move Complete",
+            description=f"Moved {len(moved_members)} user(s) from **{source_channel.name}** to **{channel.name}**.",
+            color=discord.Color.blurple()
+        )
+        if moved_members:
+            embed.add_field(name="Moved", value="\n".join(moved_members[:25]), inline=False)
+        if failed_members:
+            embed.add_field(name="Failed", value="\n".join(failed_members[:25]), inline=False)
+        embed.set_footer(text=f"Requested by {ctx.author}", icon_url=ctx.author.display_avatar.url)
+
+        await ctx.send(embed=embed)

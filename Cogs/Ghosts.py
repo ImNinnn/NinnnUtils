@@ -1,9 +1,16 @@
-from discord.ext.commands import Cog, Context, hybrid_group
+from discord import app_commands
+from discord.ext.commands import Cog, Context, hybrid_command
+
+from LowerLeveled.timestamp import discord_timestamp
 from Shared.Cache import *
 from Shared.Guilds import *
 from Shared.User import *
 from Shared.Errors import *
 from datetime import datetime, timezone
+
+from Views.Deleted import DeletedMessagesView
+from Views.v2 import V2InfoContainerView
+from main import message_cache, deleted_cache, edited_cache
 import discord
 
 async def setup(bot):
@@ -94,3 +101,93 @@ class Ghosts(Cog):
                 
                 msg['content'] = after.content
                 break
+
+    @hybrid_command(name="deleted", description="View recently deleted messages and media")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    async def deleted(self, ctx: Context, user: discord.Member = None):
+        clean_cache()
+        guild_config, _ = get_guild_config(str(ctx.guild.id))
+        if not guild_config.get("edit_delete_history_enabled", True):
+            await ctx.send(
+                "<:disapprove:1517452151012589662> Deleted message history is disabled for this server.")
+            return
+        channel_msgs = [m for m in deleted_cache if m['channel'] == ctx.channel.id]
+        if user:
+            channel_msgs = [m for m in channel_msgs if m['author'].id == user.id]
+        if not channel_msgs:
+            await ctx.send("No deleted messages found in this channel recently.")
+            return
+
+        description_lines = []
+        media_only_messages = []
+
+        for m in channel_msgs:
+            media_indicator = "<:image:1517497571470348539> " if m['media'] else ""
+            if m['media']:
+                media_only_messages.append(m)
+            content_text = m['content'] if m['content'] else "*[Media or Embed]*"
+            description_lines.append(
+                f"{media_indicator}**{m['author'].display_name}**: {content_text}\n-# Sent at {discord_timestamp(m['created_at'])}")
+
+        full_description = "\n\n".join(description_lines)
+
+        if media_only_messages:
+            media_only_messages.sort(key=lambda x: x['time'], reverse=True)
+            view = DeletedMessagesView(full_description, media_only_messages, ctx.author)
+            message = await ctx.send(view=view)
+            view.message = message
+        else:
+            view = V2InfoContainerView(
+                "<:trash:1517497581058527404> Recent deleted messages:",
+                full_description,
+                discord.Color.red(),
+            )
+            await ctx.send(view=view)
+
+    @hybrid_command(name="edited", description="Show recently edited messages in this channel")
+    @app_commands.describe(user="Optional: Only show edited messages from a specific user")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    async def edited_command(self, ctx: Context, user: discord.Member = None):
+        global edited_cache
+        clean_cache()
+        guild_config, _ = get_guild_config(str(ctx.guild.id))
+        if not guild_config.get("edit_delete_history_enabled", True):
+            await ctx.send(
+                "<:disapprove:1517452151012589662> Edited message history is disabled for this server.")
+            return
+
+        channel_edited = [m for m in edited_cache if m['channel'] == ctx.channel.id]
+
+        if user:
+            channel_edited = [m for m in channel_edited if m['author_id'] == user.id]
+
+        if not channel_edited:
+            await ctx.send("No messages have been edited in this channel recently.")
+            return
+
+        text_layout = ""
+        for msg in channel_edited[:7]:
+            text_layout += f"**{msg['author'].display_name}**: ~~{msg['old_content']}~~ ➔ {msg['new_content']}\n-# Edited at {discord_timestamp(msg['edited_at'])} | [Jump to Message]({msg['jump_url']})\n\n"
+
+        title_text = "<:edit:1517497568421085256> Recently Edited Messages"
+
+        view = V2InfoContainerView(
+            title_text,
+            text_layout,
+            discord.Color.orange(),
+        )
+        await ctx.send(view=view)
+
+    @hybrid_command(name="forget", description="Clear your messages from the bot's memory")
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
+    async def forget(self, ctx: Context):
+        clean_cache()
+        global message_cache, deleted_cache, edited_cache
+
+        message_cache = [m for m in message_cache if m['author'].id != interaction.user.id]
+        deleted_cache = [m for m in deleted_cache if m['author'].id != interaction.user.id]
+        edited_cache = [m for m in edited_cache if m['author'].id != interaction.user.id]
+
+        await ctx.send("I've wiped your messages, edits, and media from my memory!",
+                                                ephemeral=True)

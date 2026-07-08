@@ -25,6 +25,7 @@ def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
     return [cid for cid in admin_log_channels if guild.get_channel(cid) is not None]
 
 
+
 def get_guild_locked_channel_ids(guild: discord.Guild) -> list[int]:
     return [cid for cid in locked_channels if guild.get_channel(cid) is not None]
 

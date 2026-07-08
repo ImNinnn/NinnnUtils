@@ -99,3 +99,20 @@ def get_user_data(data, guild_id, user_id):
         guild["users"][user_id] = {"balance": 0, "inventory": {}}
     migrate_inventory(guild["users"][user_id])
     return guild["users"][user_id]
+
+def get_user_color_value(user_id: str) -> discord.Color:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    color_name = user_settings.get("color", "white")
+    color_map = {
+        "white": discord.Color.light_gray(),
+        "black": discord.Color.dark_gray(),
+        "red": discord.Color.red(),
+        "blue": discord.Color.blue(),
+        "green": discord.Color.green(),
+        "yellow": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+        "brown": discord.Color.dark_orange(),
+    }
+    return color_map.get(color_name, discord.Color.blurple())
