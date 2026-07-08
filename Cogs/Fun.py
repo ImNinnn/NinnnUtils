@@ -24,3 +24,8 @@ class Fun(Cog):
             f"<:list:1517497572770451567> Your random number between **{low}** and **{high}** is: **{result}**"
         )
 
+    @hybrid_command(name="say", description="Make the bot say something")
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    async def say(self, ctx: Context, message: str):
+        await ctx.send(message)
