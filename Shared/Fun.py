@@ -1,3 +1,9 @@
+import json
+import os
+
+from main import FUN_FILE
+
+
 def load_fun_data():
     if not os.path.exists(FUN_FILE):
         return {}

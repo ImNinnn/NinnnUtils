@@ -1,4 +1,11 @@
-def add_bot_error(interaction: discord.Interaction, error: Exception):
+import discord
+from discord.ext.commands import Context
+from main import bot_error_cache
+from datetime import datetime, timezone
+
+bot_error_cache = bot_error_cache
+
+def add_bot_error(interaction: discord.Interaction | Context, error: Exception):
     global bot_error_cache
 
     if interaction.guild is None:
@@ -10,8 +17,8 @@ def add_bot_error(interaction: discord.Interaction, error: Exception):
 
     bot_error_cache.append({
         "guild_id": interaction.guild.id,
-        "channel_id": interaction.channel_id,
-        "user": interaction.user,
+        "channel_id": interaction.channel.id,
+        "user": interaction.user if isinstance(interaction, discord.Interaction) else interaction.author,
         "command_name": command_name,
         "error_type": type(error).__name__,
         "error_message": str(error) or "No error message provided",

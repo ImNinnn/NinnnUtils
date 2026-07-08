@@ -1,3 +1,10 @@
+import time
+import discord
+
+from Shared.Music import get_song_queue, play_guild_song, cleanup_now_playing_embed, get_now_playing_channel, \
+    build_song_embed
+
+
 class NowPlayingControlsView(discord.ui.View):
     def __init__(self, guild_id: str):
         super().__init__(timeout=None)

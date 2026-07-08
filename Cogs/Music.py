@@ -42,7 +42,7 @@ class Music(Cog):
             queue['current_index'] = 0
             queue['loop'] = False
             queue['stop_action'] = None
-            await cleanup_now_playing_embed(guild_id)
+            await cleanup_now_playing_embed(ctx.guild)
             await voice_client.disconnect()
             await ctx.send("<:wave:1517576345603936296> Disconnected from the voice channel and cleared the queue.")
         else:
@@ -139,7 +139,7 @@ class Music(Cog):
         queue['current_index'] = len(queue['tracks'])
         queue['stop_action'] = 'manual'
         voice_client.stop()
-        await cleanup_now_playing_embed(guild_id)
+        await cleanup_now_playing_embed(ctx.guild)
         await ctx.send("<:disapprove:1517452151012589662> No more songs in the queue. Playback stopped.")
         return
     
@@ -149,33 +149,16 @@ class Music(Cog):
         guild_id = str(ctx.guild.id)
         queue = get_song_queue(guild_id)
 
-        """JSON FORMAT:
-        {
-            'tracks': [],
-            'current_index': 0,
-            'loop': False,
-            'stop_action': None,
-            'now_playing_message_id': None,
-            'now_playing_channel_id': None,
-            'now_playing_task': None,
-            'track_start_time': None,
-            'accumulated_pause': 0.0,
-            'pause_started_at': None,
-        }
-        """
-
         tracks: list = queue.get("tracks")
-        try:
-            cur = tracks.copy().pop(current)
-        except Exception:
-            cur = None
 
         return [
-            app_commands.Choice(name=song.get("title"), value=)
-            for song in tracks if current.lower() in song.get("title", "0000000") or cur
-        ]
-    
+            app_commands.Choice(name=f"{i}. {song.get('title', 'Unknown')}", value=i)
+            for i, song in enumerate(tracks)
+            if current.lower() in song.get("title", "").lower()
+        ][:25]
+
     @v.command(name="remove", description="Remove a song from the queue")
+    @app_commands.autocomplete(position=remove_autocomplete)
     @app_commands.describe(position="The track for removal (or the position)")
     async def remove(self, ctx: Context, position: int):
         voice_client = ctx.guild.voice_client
@@ -205,7 +188,7 @@ class Music(Cog):
                 queue['stop_action'] = 'manual'
                 voice_client.stop()
                 if queue['current_index'] >= len(queue['tracks']):
-                    await cleanup_now_playing_embed(guild_id)
+                    await cleanup_now_playing_embed(ctx.guild)
                     await ctx.send(f"Removed **{removed['title']}** and stopped playback because the queue is now empty.")
                     return
                 await ctx.send(f"Removed **{removed['title']}**. Now playing **{queue['tracks'][queue['current_index']]['title']}**.")

@@ -1,3 +1,5 @@
+import ast
+
 def safe_eval_math_expr(expr: str) -> int | None:
     try:
         tree = ast.parse(expr.strip(), mode='eval')

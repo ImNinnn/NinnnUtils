@@ -1,3 +1,11 @@
+import discord
+
+from LowerLeveled.jsonutils import load_json_file, save_json_file
+from Shared.Guilds import get_guild_data
+from Shared.Leveling import load_levels
+from main import USER_FILE
+
+
 def load_user_settings():
     return load_json_file(USER_FILE, {})
 
@@ -57,7 +65,7 @@ def format_user_reference(user: discord.abc.User | discord.Member, settings: dic
     if settings is None:
         settings = load_user_settings()
 
-    if get_user_settings_entry(settings, user.id).get("user_pings", True):
+    if get_user_settings_entry(settings, str(user.id)).get("user_pings", True):
         return user.mention
 
     return getattr(user, "display_name", getattr(user, "name", str(user)))

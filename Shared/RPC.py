@@ -1,4 +1,16 @@
-def start_local_rpc_worker():
+import asyncio
+import queue
+import threading
+import time
+
+from pypresence import Presence, ActivityType
+
+from main import local_rpc_thread, RPC_CLIENT_ID, local_rpc, local_rpc_stop_event, local_rpc_queue
+
+local_rpc_thread = local_rpc_thread
+local_rpc = local_rpc
+
+def start_local_rpc_worker(bot):
     global local_rpc_thread
     if not RPC_CLIENT_ID:
         return

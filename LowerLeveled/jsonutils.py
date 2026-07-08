@@ -1,3 +1,6 @@
+import os, json
+from json.decoder import JSONDecodeError
+
 def load_json_file(path: str, default=None, recover_backup: bool = True):
     if default is None:
         default = {}
@@ -8,7 +11,7 @@ def load_json_file(path: str, default=None, recover_backup: bool = True):
     try:
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
-    except json.JSONDecodeError:
+    except JSONDecodeError:
         if recover_backup:
             backup_path = path + '.bak'
             if os.path.exists(backup_path):
@@ -18,7 +21,7 @@ def load_json_file(path: str, default=None, recover_backup: bool = True):
                     save_json_file(path, recovered)
                     print(f"Recovered {os.path.basename(path)} from backup after corruption.")
                     return recovered
-                except (json.JSONDecodeError, OSError):
+                except (JSONDecodeError, OSError):
                     pass
         print(f"Warning: {os.path.basename(path)} is corrupted and could not be loaded. Returning default.")
         return default

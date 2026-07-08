@@ -1,3 +1,11 @@
+import os
+
+import discord
+
+from LowerLeveled.jsonutils import load_json_file, save_json_file
+from main import LOCK_CONFIG_FILE, admin_log_channels, locked_channels
+
+
 def load_lock_config():
     if not os.path.exists(LOCK_CONFIG_FILE):
         return {}, {}

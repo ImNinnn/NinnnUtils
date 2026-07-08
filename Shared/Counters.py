@@ -1,3 +1,14 @@
+import discord
+
+from LowerLeveled.expr import safe_eval_math_expr
+from Shared.Guilds import get_guild_config, save_guild_data
+from discord import HTTPException, Forbidden, NotFound
+
+"""HTTPException – Adding the reaction failed.
+Forbidden – You do not have the proper permissions to react to the message.
+NotFound – The emoji you specified was not found.
+TypeError – The emoji parameter is invalid."""
+
 def get_guild_counter_entries(guild: discord.Guild) -> list[str]:
     guild_config, _ = get_guild_config(str(guild.id))
     entries = []
@@ -85,7 +96,7 @@ def apply_counter_result(message: discord.Message, result: str):
     channel_id = message.channel.id
     config = get_counter_channel_config(guild_id, channel_id)
     if not config:
-        return
+        return None
 
     if result == "ok":
         current = config.get("current_value", 0) + 1
@@ -114,7 +125,7 @@ async def handle_counter_message(message: discord.Message):
     if emoji:
         try:
             await message.add_reaction(emoji)
-        except Exception:
+        except NotFound | Forbidden | HTTPException | TypeError:
             pass
         return True
     return False

@@ -1,3 +1,7 @@
+from LowerLeveled.jsonutils import load_json_file, save_json_file
+from main import LEVEL_FILE
+
+
 def load_levels():
     return load_json_file(LEVEL_FILE, {})
 

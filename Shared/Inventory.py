@@ -1,3 +1,6 @@
+from LowerLeveled.items import find_item_key
+
+
 def inventory_count(inventory: dict, item_name: str) -> int:
     key = find_item_key(inventory, item_name)
     return inventory[key] if key else 0

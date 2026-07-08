@@ -1,3 +1,11 @@
+from datetime import datetime, timedelta, timezone
+from main import message_cache, deleted_cache, edited_cache, bot_error_cache
+
+message_cache = message_cache
+deleted_cache = deleted_cache
+edited_cache = edited_cache
+bot_error_cache = bot_error_cache
+
 def clean_cache():
     global message_cache, deleted_cache, edited_cache, bot_error_cache
     now = datetime.now(timezone.utc)

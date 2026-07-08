@@ -1,3 +1,5 @@
+import discord
+
 async def safe_edit_message(message: discord.Message, view: discord.ui.View):
     try:
         await message.edit(view=view)

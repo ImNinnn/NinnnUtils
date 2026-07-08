@@ -1,0 +1,6 @@
+discord.py
+python-dotenv
+pillow
+deep-translator
+pypresence
+yt-dlp

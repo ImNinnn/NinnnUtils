@@ -1,4 +1,12 @@
-from main import song_queues
+from __future__ import annotations
+
+import asyncio
+
+import yt_dlp
+from discord import Guild
+
+from Views.Music import NowPlayingControlsView
+from main import song_queues, YTDL_OPTIONS, FFMPEG_PATH, FFMPEG_OPTIONS
 import discord, time
 
 def get_song_queue(guild_id: str) -> dict:
@@ -92,8 +100,8 @@ def build_song_embed(guild_id: str) -> discord.Embed | None:
 
     return embed
 
-async def cleanup_now_playing_embed(guild_id: str):
-    queue = get_song_queue(guild_id)
+async def cleanup_now_playing_embed(guild: Guild):
+    queue = get_song_queue(guild.id)
     task = queue.get('now_playing_task')
     queue['now_playing_task'] = None
     if task is not None and not task.done():
@@ -111,7 +119,7 @@ async def cleanup_now_playing_embed(guild_id: str):
     if not channel_id or not message_id:
         return
 
-    channel = bot.get_channel(channel_id)
+    channel = guild.get_channel(channel_id)
     if not channel:
         return
 
@@ -122,20 +130,20 @@ async def cleanup_now_playing_embed(guild_id: str):
         pass
 
 
-def get_now_playing_channel(queue: dict) -> discord.TextChannel | None:
+def get_now_playing_channel(bot, queue: dict) -> discord.TextChannel | None:
     if not queue.get('now_playing_channel_id'):
         return None
     return bot.get_channel(queue['now_playing_channel_id'])
 
 
-async def refresh_now_playing_embed(guild_id: str):
-    queue = get_song_queue(guild_id)
+async def refresh_now_playing_embed(guild: Guild):
+    queue = get_song_queue(str(guild.id))
     if not queue.get('now_playing_message_id'):
         return
-    channel = get_now_playing_channel(queue)
+    channel = get_now_playing_channel(guild, queue) # A guild can also be used to get a channel!
     if not channel:
         return
-    embed = build_song_embed(guild_id)
+    embed = build_song_embed(str(guild.id))
     if not embed:
         return
     try:
@@ -150,52 +158,52 @@ async def refresh_now_playing_embed(guild_id: str):
         pass
 
 
-async def update_now_playing_embed_loop(guild_id: str):
-    queue = get_song_queue(guild_id)
+async def update_now_playing_embed_loop(guild: Guild):
+    queue = get_song_queue(str(guild.id))
     while True:
         await asyncio.sleep(10)
         if not queue.get('now_playing_message_id') or not queue.get('tracks'):
             break
         if queue['current_index'] >= len(queue['tracks']):
             break
-        await refresh_now_playing_embed(guild_id)
+        await refresh_now_playing_embed(guild)
     queue['now_playing_task'] = None
 
 
-async def start_now_playing_embed(guild_id: str):
-    queue = get_song_queue(guild_id)
+async def start_now_playing_embed(guild: Guild):
+    queue = get_song_queue(str(guild.id))
     if not queue.get('tracks') or queue['current_index'] >= len(queue['tracks']):
         return
     if not queue.get('now_playing_channel_id'):
         return
 
-    await cleanup_now_playing_embed(guild_id)
-    channel = get_now_playing_channel(queue)
+    await cleanup_now_playing_embed(guild)
+    channel = get_now_playing_channel(guild, queue)
     if not channel:
         return
 
-    embed = build_song_embed(guild_id)
+    embed = build_song_embed(str(guild.id))
     if not embed:
         return
 
     try:
         view = queue.get('now_playing_view')
         if view is None:
-            view = NowPlayingControlsView(guild_id)
+            view = NowPlayingControlsView(str(guild.id))
             queue['now_playing_view'] = view
         else:
             view.update_button_states()
 
         message = await channel.send(embed=embed, view=view)
         queue['now_playing_message_id'] = message.id
-        queue['now_playing_task'] = asyncio.create_task(update_now_playing_embed_loop(guild_id))
+        queue['now_playing_task'] = asyncio.create_task(update_now_playing_embed_loop(guild))
     except Exception:
         queue['now_playing_message_id'] = None
         queue['now_playing_task'] = None
 
 
-async def play_guild_song(guild_id: str, voice_client: discord.VoiceClient) -> bool:
-    queue = get_song_queue(guild_id)
+async def play_guild_song(guild: Guild, voice_client: discord.VoiceClient) -> bool:
+    queue = get_song_queue(str(guild.id))
     if not queue['tracks']:
         return False
 
@@ -215,41 +223,39 @@ async def play_guild_song(guild_id: str, voice_client: discord.VoiceClient) -> b
         def after_play(error):
             if error:
                 print(f"Playback ended. Error: {error}")
-            bot.loop.call_soon_threadsafe(asyncio.create_task, playback_ended(guild_id, error))
+            bot.loop.call_soon_threadsafe(asyncio.create_task, playback_ended(guild, error))
 
         voice_client.play(audio_source, after=after_play)
         queue['track_start_time'] = time.time()
         queue['accumulated_pause'] = 0.0
         queue['pause_started_at'] = None
-        await start_now_playing_embed(guild_id)
+        await start_now_playing_embed(guild)
         return True
     except Exception as e:
         print(f"Failed to start playback: {e}")
         return False
 
-async def playback_ended(guild_id: str, error=None):
-    queue = get_song_queue(guild_id)
+async def playback_ended(guild: Guild, error=None):
+    queue = get_song_queue(str(guild.id))
     if queue.get('stop_action'):
         queue['stop_action'] = None
         return
 
     if queue['loop'] and queue['tracks']:
-        guild = bot.get_guild(int(guild_id))
         voice_client = guild.voice_client if guild else None
         if voice_client and voice_client.is_connected():
-            await play_guild_song(guild_id, voice_client)
+            await play_guild_song(guild, voice_client)
         return
 
     is_last_track = queue['current_index'] + 1 >= len(queue['tracks'])
     if is_last_track:
-        await refresh_now_playing_embed(guild_id)
+        await refresh_now_playing_embed(guild)
 
     queue['current_index'] += 1
     if queue['current_index'] < len(queue['tracks']):
-        guild = bot.get_guild(int(guild_id))
         voice_client = guild.voice_client if guild else None
         if voice_client and voice_client.is_connected():
-            await play_guild_song(guild_id, voice_client)
+            await play_guild_song(guild, voice_client)
         return
 
     return
