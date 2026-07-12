@@ -30,7 +30,7 @@ class Leveling(Cog):
 
     @hybrid_group(name="level", description="View your current server tier standing level rank card")
     @app_commands.allowed_installs(guilds=True, users=False)
-    async def view_level(self, ctx: Context, user: discord.Member = None):
+    async def l(self, ctx: Context, user: discord.Member = None):
         target = user or ctx.author
         levels = load_levels()
         g_id, u_id = str(ctx.guild.id), str(target.id)
@@ -64,7 +64,7 @@ class Leveling(Cog):
 
         await ctx.send(embed=embed)
 
-    @view_level.command(name="lvl-leaderboard", description="Display the top 10 highest-level users in this guild")
+    @l.command(name="leaderboard", description="Display the top 10 highest-level users in this guild")
     @app_commands.allowed_installs(guilds=True, users=False)
     async def level_leaderboard(self, ctx: Context):
         levels = load_levels()
@@ -90,7 +90,7 @@ class Leveling(Cog):
         embed.description = description_text
         await ctx.send(embed=embed)
 
-    @view_level.command(name="lvl-edit",
+    @l.command(name="edit",
                       description="(Admin) Manually adjust or set a target user's level and XP indexes")
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.checks.has_permissions(manage_guild=True)
@@ -110,7 +110,7 @@ class Leveling(Cog):
             f"<:gear:1517576939097952496> Action complete. Set {format_user_reference(user)} to **Level {level}** with **{xp} XP**.",
             ephemeral=True)
 
-    @view_level.command(name="info-lvl-rewards", description="Show the level rewards configured for this guild")
+    @l.command(name="rewards", description="Show the level rewards configured for this guild")
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.describe(level="Optional specific level to inspect")
     async def info_lvl_rewards(self, ctx: Context, level: int = None):
@@ -144,28 +144,3 @@ class Leveling(Cog):
             )
 
         await ctx.send(embed=embed)
-
-    @view_level.command(name="lvl-rewards-del", description="(Admin) Delete all rewards configured for a level")
-    @app_commands.allowed_installs(guilds=True, users=False)
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(level="The level whose rewards should be removed")
-    async def lvl_rewards_del(self, ctx: Context, level: int):
-        levels = load_levels()
-        g_id = str(ctx.guild.id)
-
-        if g_id not in levels or "config" not in levels[g_id] or "rewards" not in levels[g_id]["config"]:
-            return await ctx.send(
-                f"<:disapprove:1517452151012589662> No rewards are configured for level {level} in this server.",
-                ephemeral=True)
-
-        rewards = levels[g_id]["config"]["rewards"]
-        if str(level) not in rewards:
-            return await ctx.send(
-                f"<:disapprove:1517452151012589662> No rewards are configured for level {level} in this server.",
-                ephemeral=True)
-
-        del rewards[str(level)]
-        save_levels(levels)
-
-        await ctx.send(
-            f"<:trash:1517497581058527404> Removed all rewards configured for level {level}.", ephemeral=True)

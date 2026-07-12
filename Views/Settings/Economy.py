@@ -163,7 +163,7 @@ class EconomySettingsView(LayoutView):
             pass
 
     async def handle_back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
     async def handle_shop_edit(self, interaction: discord.Interaction):
         settings_message = interaction.message
@@ -240,12 +240,13 @@ class EconomySettingsView(LayoutView):
             "give_item_amount": give_item_amount,
         }
         save_data(data)
-        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
         await interaction.response.send_message(
             f"<:approve:1517452125687513158> Use effect for **{item_name}** saved. Choose a role to grant when it is used. Press No to skip.",
             view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a role", item_name, settings_message, self.handle_use_role_selection, False),
             ephemeral=True,
         )
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
+
 
     async def handle_use_role_selection(self, interaction: discord.Interaction, role_id: int | None, item_name: str, settings_message: discord.Message | None, is_temp_role: bool):
         data = load_data()
@@ -282,7 +283,6 @@ class EconomySettingsView(LayoutView):
 
         effect["role_id"] = role_id
         save_data(data)
-        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color), settings_message)
         if role_id is None:
             await interaction.response.send_message(
                 f"<:approve:1517452125687513158> Role setup skipped for **{item_name}**. Choose a temporary role next, or press No to skip.",
@@ -296,7 +296,10 @@ class EconomySettingsView(LayoutView):
             view=EconomyRoleSelectionView(self.user_id, interaction.guild, "Choose a temporary role", item_name, settings_message, self.handle_use_role_selection, True),
             ephemeral=True,
         )
-
+        await self.refresh_settings_message(interaction, EconomySettingsView(self.user_id, self.guild_id, self.color),
+                                            settings_message)
+        return
+    
     async def handle_temp_role_duration_submit(self, interaction: discord.Interaction, days: int, hours: int, minutes: int, seconds: int, item_name: str, settings_message: discord.Message | None):
         data = load_data()
         guild = get_guild_data(data, self.guild_id)

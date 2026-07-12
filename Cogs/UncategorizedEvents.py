@@ -10,9 +10,11 @@ from discord import app_commands
 
 from Shared.Fun import load_fun_data
 from Shared.Leveling import add_xp
+from Shared.Moderation import apply_honeypot_sanction
 from main import NinnnUtils, locked_channels, admin_log_channels, server_pauses, all_paused_guilds, message_cache
-from .RPC import RPC
-from .Blacklist import Blacklist
+from Giveaways import Giveaways
+from RPC import RPC
+from Blacklist import Blacklist
 
 async def setup(bot):
     await bot.add_cog(UnEvents(bot))
@@ -26,6 +28,7 @@ class UnEvents(Cog):
         await self.bot.wait_until_ready()
         cog: RPC = self.bot.get_cog("RPC")
         blk: Blacklist = self.bot.get_cog("Blacklist")
+        gws: Giveaways = self.bot.get_cog("Giveaways")
         shard_info = (
             f"{len(self.bot.shards)} shard(s), IDs {list(self.bot.shards.keys())}"
             if self.bot.shards
@@ -40,6 +43,10 @@ class UnEvents(Cog):
 
         if not voice.voice_xp_tracker.is_running():
             voice.voice_xp_tracker.start()
+        if not gws.giveaway_loop.is_running():
+            gws.giveaway_loop.start()
+        if not gws.giveaway_refresh_loop.is_running():
+            gws.giveaway_refresh_loop.start()
         self.bot.loop.create_task(blk.blacklist_startup_cleanup())
 
     @Cog.listener()
@@ -80,8 +87,15 @@ class UnEvents(Cog):
             else:
                 await interaction.response.send_message(message_text, ephemeral=True)
         else:
-            add_bot_error(interaction, original_error)
             command_name = getattr(getattr(interaction, "command", None), "qualified_name", None) or getattr(getattr(interaction, "command", None), "name", "unknown command")
+            add_bot_error(
+                getattr(interaction, "guild_id", None),
+                getattr(interaction, "channel_id", None),
+                getattr(interaction, "user", None),
+                command_name,
+                original_error,
+                interaction=interaction,
+            )
             print(f"Ignored exception in command tree [{command_name}]: {type(original_error).__name__}: {original_error}")
             print("".join(traceback.format_exception(type(original_error), original_error, original_error.__traceback__)))
             if not interaction.response.is_done():
@@ -91,6 +105,14 @@ class UnEvents(Cog):
     async def on_message(self, message):
         if message.author.bot:
             return
+
+        if message.guild:
+            if await apply_honeypot_sanction(message.author, message.guild, message.channel, message.content):
+                try:
+                    await message.delete()
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                return
 
         if message.guild and message.channel.id in locked_channels:
             guild_id = message.guild.id

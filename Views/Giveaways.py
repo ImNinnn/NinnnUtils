@@ -24,7 +24,7 @@ class LeaveGiveawayConfirmView(View):
         data[self.giveaway_id] = giveaway
         save_giveaway_data(data)
 
-        updated_view = GiveawayView(self.giveaway_id, giveaway)
+        updated_view = GiveawayView(self.giveaway_id, giveaway, bot=interaction.client)
         try:
             if self.original_message is not None:
                 await self.original_message.edit(view=updated_view)
@@ -82,7 +82,7 @@ class GiveawayView(LayoutView):
             data[self.giveaway_id] = giveaway
             save_giveaway_data(data)
 
-            updated_view = GiveawayView(self.giveaway_id, giveaway)
+            updated_view = GiveawayView(self.giveaway_id, giveaway, bot=interaction.client)
             try:
                 await interaction.message.edit(view=updated_view)
             except Exception:

@@ -65,10 +65,8 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
         user_data["level"] += 1
         leveled_up = True
 
-    first_time_level_up = False
-    if leveled_up and not get_user_has_leveled_up_before(user_id):
-        first_time_level_up = True
-        set_user_has_leveled_up_before(user_id, True)
+    has_leveled_up_before = get_user_has_leveled_up_before(user_id)
+    first_time_level_up = leveled_up and not has_leveled_up_before
 
     save_levels(levels)
 
@@ -76,6 +74,7 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
         rewards = levels[guild_id]["config"].get("rewards", {})
         current_level = user_data["level"]
         reward = rewards.get(str(current_level))
+        level_up_notification_sent = False
         if reward:
             if isinstance(reward, (str, int)):
                 reward = {"role_id": int(reward)}
@@ -116,7 +115,7 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
                     bot.loop.create_task(remove_temp_role(role))
 
             if reward.get("xp", 0) > 0:
-                await add_xp(member, guild, reward["xp"], announce_channel=announce_channel)
+                await add_xp(bot, member, guild, reward["xp"], announce_channel=announce_channel)
 
         guild_config = get_guild_config(str(guild.id))[0]
         if guild_config.get("level_up_message_enabled", False) and announce_channel is not None:
@@ -125,6 +124,7 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
                 if first_time_level_up:
                     level_up_message += "\n-# Use /settings and go to the user settings to disable pings."
                 await announce_channel.send(level_up_message)
+                level_up_notification_sent = True
             except discord.Forbidden as error:
                 add_bot_error_entry(guild.id, announce_channel.id, member, "level up message", error)
             except Exception:
@@ -145,8 +145,12 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
                         content=level_banner_message,
                         file=file
                     )
+                    level_up_notification_sent = True
                 except discord.Forbidden as error:
                     add_bot_error_entry(guild.id, target_channel.id, member, "level banner", error)
+
+        if first_time_level_up and level_up_notification_sent:
+            set_user_has_leveled_up_before(user_id, True)
 
 async def create_levelup_card(member: discord.Member, level: int):
     base_path = os.path.dirname(__file__)

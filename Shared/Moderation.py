@@ -1,12 +1,14 @@
 import re
 from datetime import datetime, timezone, timedelta
+from typing import Any
 
 import discord
 from discord import AutoModTrigger, AutoModRuleTriggerType, AutoModRuleAction, AutoModRuleActionType, \
     AutoModRuleEventType
 
-from Shared.Guilds import load_guild_data, save_guild_data, get_guild_config
-from Shared.Locks import get_guild_admin_log_channel_ids
+from LowerLeveled.channel import _get_channel_mentions
+from Shared.Guilds import load_guild_data, save_guild_data, get_guild_config, _get_guild_channel_ids
+from main import admin_log_channels
 
 
 def get_guild_warnings(guild_id: str, member_id: int):
@@ -28,7 +30,7 @@ async def add_guild_warning(guild_id: str, member_id: int, reason: str, moderato
     save_guild_data(data)
     return user_warnings, data
 
-def get_guild_automod_config(guild_id: str) -> tuple[dict, dict]:
+def get_guild_automod_config(guild_id: str) -> tuple[Any, Any] | None:
     data = load_guild_data()
     guild = data.setdefault(guild_id, {})
     automod = guild.setdefault("automod", {})
@@ -57,7 +59,7 @@ def get_guild_automod_config(guild_id: str) -> tuple[dict, dict]:
             automod.setdefault("warning_sanctions", []).extend(migrated)
             save_guild_data(data)
 
-        return automod, data
+    return automod, data
 
 def automod_text_matches(content: str, phrase: str, use_regex: bool = False) -> bool:
     if not content or not phrase:
@@ -219,3 +221,11 @@ async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: 
         return False
 
     return True
+
+def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
+    """Get valid admin log channel IDs for this guild"""
+    return _get_guild_channel_ids(guild, admin_log_channels)
+
+def get_admin_log_channel_mentions(guild: discord.Guild) -> list[str]:
+    """Get mentions for admin log channels"""
+    return _get_channel_mentions(guild, admin_log_channels)

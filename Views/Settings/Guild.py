@@ -1,5 +1,192 @@
 from . import *
 
+class GuildSettingsMenuView(LayoutView):
+    def __init__(self, user_id: int, guild_id: str):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.guild_id = guild_id
+        self.color = get_user_color_value(str(user_id))
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.general_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_general",
+        )
+        self.channel_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_channel",
+        )
+        self.economy_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_economy",
+        )
+        self.level_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_level",
+        )
+        self.automod_button = Button(
+            label="Open",
+            style=discord.ButtonStyle.primary,
+            custom_id="guild_settings_menu_automod",
+        )
+
+        async def open_general(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use guild settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            guild_config, _ = get_guild_config(self.guild_id)
+            new_view = GuildSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                ghost_pings=guild_config.get("ghost_ping_enabled", False),
+                history_enabled=guild_config.get("edit_delete_history_enabled", True),
+                level_up_enabled=guild_config.get("level_up_message_enabled", False),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_channel_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use channel settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_channels:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Channels permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = ChannelSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_economy_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use economy settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = EconomySettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_level_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use level settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = LevelSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+                settings_message=interaction.message,
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def open_automod_settings(interaction: discord.Interaction):
+            if not interaction.guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use automod settings from a user install.",
+                    ephemeral=True,
+                )
+                return
+
+            member = interaction.user if isinstance(interaction.user, discord.Member) else interaction.guild.get_member(interaction.user.id)
+            if not member or not member.guild_permissions.manage_guild:
+                await interaction.response.send_message(
+                    "<:disapprove:1517452151012589662> You can't use this because you need the Manage Server permission.",
+                    ephemeral=True,
+                )
+                return
+
+            new_view = AutomodSettingsView(
+                interaction.user.id,
+                self.guild_id,
+                get_user_color_value(str(interaction.user.id)),
+            )
+            await interaction.response.edit_message(view=new_view)
+
+        async def back_callback(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+
+        self.general_button.callback = open_general
+        self.channel_button.callback = open_channel_settings
+        self.economy_button.callback = open_economy_settings
+        self.level_button.callback = open_level_settings
+        self.automod_button.callback = open_automod_settings
+
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="guild_settings_menu_back")
+        self.back_button.callback = back_callback
+
+        container = Container(
+            TextDisplay("<:gear:1517576939097952496> **Guild settings**"),
+            TextDisplay("Choose which guild section to configure."),
+            Separator(),
+            Section("<:edit:1517497568421085256> General settings", accessory=self.general_button),
+            Section("<:list:1517497572770451567> Channel settings", accessory=self.channel_button),
+            Section("<:money:1517580310395486239> Economy settings", accessory=self.economy_button),
+            Section("<:chalice:1517579767573123092> Level settings", accessory=self.level_button),
+            Section("<:warning:1517452174991556758> Automod settings", accessory=self.automod_button),
+            accent_color=self.color,
+        )
+        self.add_item(container)
+        self.add_item(discord.ui.ActionRow(self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This settings panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
 class GuildSettingsView(LayoutView):
     def __init__(self, user_id: int, guild_id: str, ghost_pings: bool, history_enabled: bool, level_up_enabled: bool, bot):
         super().__init__(timeout=180)

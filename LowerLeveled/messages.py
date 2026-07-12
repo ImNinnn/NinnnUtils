@@ -15,5 +15,5 @@ async def safe_send(interaction: discord.Interaction, content: str, **kwargs):
             await interaction.followup.send(content, **kwargs)
         except (discord.NotFound, discord.HTTPException):
             pass
-    except discord.NotFound | discord.HTTPException:
+    except (discord.NotFound, discord.HTTPException):
         pass

@@ -31,7 +31,7 @@ class RPC(Cog):
         VERSION_ALTERNATE = os.getenv('BOT_VERSION_ALTERNATE')
         ACTIVITY_TEXT = os.getenv('ACTIVITY')
 
-        # cycle between three presence messages
+
         online_users = sum(
             len([m for m in guild.members if m.status != discord.Status.offline and not m.bot])
             for guild in self.bot.guilds

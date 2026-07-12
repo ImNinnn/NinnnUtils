@@ -90,7 +90,7 @@ class Guild(Cog):
                 ch_id = cfg.get("channel_id")
                 required = cfg.get("required_count") or cfg.get("required") or cfg.get("required_count", None)
                 channel_repr = fmt_channel(ch_id)
-                # prefer to show emoji (emoji_key) and required count
+                
                 req_text = f"required {required}" if required is not None else "required ?"
                 board_entries.append(f"{emoji_key} in {channel_repr} ({req_text})")
         board_channels = "\n".join(board_entries) if board_entries else "None"

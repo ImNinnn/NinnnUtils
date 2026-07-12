@@ -1,8 +1,10 @@
+from typing import Any
+
 import discord
 
 from LowerLeveled.jsonutils import load_json_file, save_json_file
 from Shared.DataManager import DataManager
-from main import GUILD_FILE
+from main import GUILD_FILE, admin_log_channels, locked_channels
 
 
 def load_guild_data():
@@ -12,7 +14,7 @@ def load_guild_data():
 def save_guild_data(data):
     DataManager.save(GUILD_FILE, data)
 
-def get_guild_config(guild_id: str) -> dict:
+def get_guild_config(guild_id: str) -> tuple[Any, Any]:
     data = load_guild_data()
     default_config = {
         "welcome_channel_id": None,
@@ -68,3 +70,7 @@ def get_guild_data(data, guild_id):
             "item_values": {}
         }
     return data[guild_id]
+
+def _get_guild_channel_ids(guild: discord.Guild, channel_dict: dict) -> list[int]:
+    """Generic helper to get valid channel IDs from a dictionary"""
+    return [cid for cid in channel_dict if guild.get_channel(cid) is not None]

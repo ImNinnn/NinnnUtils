@@ -146,7 +146,7 @@ class Fun(Cog):
         embed.set_footer(text=f"Before: ${before_balance} • After: ${user_data['balance']}")
         await ctx.send(embed=embed)
 
-    @g.command(name="mines", description="Play minesweeper and wager money")
+    @g.command(name="minesweeper", description="Play minesweeper and wager money")
     @app_commands.allowed_installs(guilds=True, users=False)
     async def game_mines(self, ctx: Context, amount: int, mines: int):
         if amount <= 0:

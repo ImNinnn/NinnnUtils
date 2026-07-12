@@ -21,11 +21,6 @@ def load_lock_config():
 def save_lock_config(locked, admin):
     save_json_file(LOCK_CONFIG_FILE, {"locked_channels": locked, "admin_log_channels": admin})
 
-def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
-    return [cid for cid in admin_log_channels if guild.get_channel(cid) is not None]
-
-
-
-def get_guild_locked_channel_ids(guild: discord.Guild) -> list[int]:
-    return [cid for cid in locked_channels if guild.get_channel(cid) is not None]
-
+def get_locked_channel_mentions(guild: discord.Guild) -> list[str]:
+    """Get mentions for locked channels"""
+    return _get_channel_mentions(guild, locked_channels)

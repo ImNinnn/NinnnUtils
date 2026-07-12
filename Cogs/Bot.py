@@ -10,8 +10,9 @@ from Shared.Cache import clean_cache
 from Shared.Errors import add_bot_error_entry
 from Shared.Owner import update_env_setting
 from Shared.RPC import close_local_rpc
+from Views.Servers import ServersListView
 from Views.v2 import V2InfoContainerView
-from main import bot_error_cache, VERSION, VERSION_ALTERNATE, ACTIVITY_TEXT
+from main import bot_error_cache, VERSION, VERSION_ALTERNATE, ACTIVITY_TEXT, PREFIX
 
 command = hybrid_command
 
@@ -49,7 +50,16 @@ class Bot(Cog):
         total_shards = len(self.bot.shards) or 1
         shard_info = f"Shard id: {guild_shard_id} | total: {total_shards}"
         embed.add_field(name="<:shard:1518376149741338744> Shard Info", value=shard_info, inline=True)
-        embed.add_field(name="<:nUtils:1518376146008539146> Bot owner", value="-ImNinnn- (imninnn.)", inline=True)
+
+        app_info = await self.bot.application_info()
+        if app_info.team:
+            owner_value = app_info.team.name
+        elif app_info.owner:
+            owner_value = f"{app_info.owner.name}#{app_info.owner.discriminator}"
+        else:
+            owner_value = "Unknown"
+
+        embed.add_field(name="<:nUtils:1518376146008539146> Bot owner", value=owner_value, inline=True)
         await ctx.send(embed=embed)
 
     @hybrid_command(name="errors", description="Show recent bot errors in this server")
@@ -95,7 +105,7 @@ class Bot(Cog):
     @command(name="ver")
     async def set_bot_version(self, ctx: Context, *, new_value: str = ""):
         if not await self.bot.is_owner(ctx.author):
-            return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+            return await ctx.send(f"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only....")
 
         global VERSION
 
@@ -115,7 +125,7 @@ class Bot(Cog):
     @command(name="alt")
     async def set_bot_alt_version(self, ctx: Context, *, new_value: str = ""):
         if not await self.bot.is_owner(ctx.author):
-            return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+            return await ctx.send(f"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
         global VERSION_ALTERNATE
 
@@ -135,7 +145,7 @@ class Bot(Cog):
     @command(name="activity")
     async def set_bot_activity(self, ctx: Context, *, new_value: str = ""):
         if not await self.bot.is_owner(ctx.author):
-            return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+            return await ctx.send(f"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
         global ACTIVITY_TEXT
 
@@ -155,7 +165,7 @@ class Bot(Cog):
     @command(name="shutdown")
     async def own_shutdown(self, ctx: Context, *, args: str = ""):
         if not await self.bot.is_owner(ctx.author):
-            return await ctx.send("<:disapprove:1517452151012589662> Do not even try...")
+            return await ctx.send(f"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
 
         channel = None
         reason = "No reason provided"
@@ -226,3 +236,13 @@ class Bot(Cog):
             await self.bot.change_presence(activity=sleep_activity, status=discord.Status.idle, shard_id=shard_id)
         close_local_rpc()
         await self.bot.close()
+
+    @hybrid_command(name="servers")
+    async def list_servers(self, ctx: Context):
+        if not await self.bot.is_owner(ctx.author):
+            return await ctx.send(
+                F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
+
+        guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
+        view = ServersListView(ctx.author.id, guilds)
+        await ctx.send(embed=view.get_page_embed(), view=view)
