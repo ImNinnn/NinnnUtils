@@ -2,11 +2,13 @@ import asyncio
 import ast
 import json
 import os
+import math
 import random
 import re
 import subprocess
 import sys
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from collections import Counter
 import yt_dlp
@@ -16,7 +18,7 @@ from discord.automod import AutoModRuleAction, AutoModTrigger
 from discord.enums import AutoModRuleActionType, AutoModRuleEventType, AutoModRuleTriggerType
 from discord.ext import tasks, commands
 from dotenv import load_dotenv
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageSequence
 import io
 import unicodedata
 from deep_translator import GoogleTranslator
@@ -50,6 +52,7 @@ BLACKLISTED_GUILDS = [int(sid.strip()) for sid in raw_blacklist.split(',') if si
 ACTIVITY_TEXT = os.getenv('ACTIVITY')
 SHARD_COUNT = int(os.getenv('SHARD_COUNT', '0'))
 PREFIX = os.getenv('PREFIX')
+OWN_PASSWORD = os.getenv('OWN_PASSWORD')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'economy.json')
@@ -987,6 +990,379 @@ def get_user_pings_enabled(user_id: str) -> bool:
     return get_user_settings_entry(settings, user_id).get("user_pings", True)
 
 
+MAX_USER_NOTES = 3
+MAX_USER_REMINDERS = 7
+MAX_USER_LIST_ITEMS = 30
+CHECKLIST_PAGE_SIZE = 10
+
+
+def can_add_user_reminder(user_id: str) -> bool:
+    return len(get_user_reminders(user_id)) < MAX_USER_REMINDERS
+
+
+def get_user_banner_style(user_id: str) -> str:
+    settings = load_user_settings()
+    return get_user_settings_entry(settings, user_id).get("banner_style", "normal")
+
+
+def get_user_notes(user_id: str) -> list[str]:
+    settings = load_user_settings()
+    notes = get_user_settings_entry(settings, user_id).get("notes")
+    if isinstance(notes, list):
+        return [str(note) for note in notes[:MAX_USER_NOTES]]
+    return []
+
+
+def save_user_notes(user_id: str, notes: list[str]) -> None:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    user_settings["notes"] = [str(note) for note in notes[:MAX_USER_NOTES]]
+    save_user_settings(settings)
+
+
+def get_user_reminders(user_id: str) -> list[dict]:
+    settings = load_user_settings()
+    reminders = get_user_settings_entry(settings, user_id).get("reminders")
+    if isinstance(reminders, list):
+        valid_reminders = []
+        for reminder in reminders:
+            if isinstance(reminder, dict) and "name" in reminder and "when" in reminder:
+                valid_reminders.append(reminder)
+        return valid_reminders
+    return []
+
+
+def save_user_reminders(user_id: str, reminders: list[dict]) -> None:
+    settings = load_user_settings()
+    get_user_settings_entry(settings, user_id)["reminders"] = reminders
+    save_user_settings(settings)
+
+
+def get_user_lists(user_id: str) -> list[list[dict]]:
+    settings = load_user_settings()
+    lists = get_user_settings_entry(settings, user_id).get("lists")
+    if not isinstance(lists, list) or len(lists) < 1:
+        return [[]]
+    first_list = lists[0]
+    if isinstance(first_list, list):
+        return [[item for item in first_list if isinstance(item, dict)]]
+    return [[]]
+
+
+def save_user_lists(user_id: str, lists: list[list[dict]]) -> None:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    normalized = []
+    first_list = lists[0] if lists and isinstance(lists[0], list) else []
+    normalized.append(first_list[:MAX_USER_LIST_ITEMS])
+    user_settings["lists"] = normalized
+    save_user_settings(settings)
+
+
+def parse_reminder_time(value: str) -> int | None:
+    if not value:
+        return None
+    text = value.strip()
+    if text.lower().startswith("in "):
+        seconds = parse_duration_to_seconds(text[3:])
+        if seconds is None or seconds <= 0:
+            return None
+        return int(datetime.now(timezone.utc).timestamp()) + seconds
+
+    match = re.fullmatch(r"at\s+(\d{2})/(\d{2})/(\d{2})\s+(\d{1,2}):(\d{2})", text, re.IGNORECASE)
+    if match:
+        year = 2000 + int(match.group(1))
+        month = int(match.group(2))
+        day = int(match.group(3))
+        hour = int(match.group(4))
+        minute = int(match.group(5))
+        try:
+            reminder_dt = datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+        except ValueError:
+            return None
+        if reminder_dt <= datetime.now(timezone.utc):
+            return None
+        return int(reminder_dt.timestamp())
+
+    return None
+
+
+def find_reminder_index(reminders: list[dict], identifier: str) -> int | None:
+    identifier_text = str(identifier).strip()
+    if identifier_text.isdigit():
+        index = int(identifier_text) - 1
+        if 0 <= index < len(reminders):
+            return index
+    for index, reminder in enumerate(reminders):
+        if str(reminder.get("name", "")).strip().lower() == identifier_text.lower():
+            return index
+    return None
+
+
+def find_checklist_item_index(item_list: list[dict], identifier: str) -> int | None:
+    identifier_text = str(identifier).strip()
+    if identifier_text.isdigit():
+        index = int(identifier_text) - 1
+        if 0 <= index < len(item_list):
+            return index
+    for index, item in enumerate(item_list):
+        if str(item.get("content", "")).strip().lower() == identifier_text.lower():
+            return index
+    return None
+
+
+def format_checklist_item(item: dict, index: int) -> str:
+    status = item.get("status", "none")
+    emoji = {
+        "red": "<:disapprove:1517452151012589662>",
+        "green": "<:approve:1517452125687513158>",
+        "yellow": "<:warning:1517452174991556758>",
+    }.get(status, "")
+    content = item.get("content", "")
+    return f"{index + 1}. {emoji} {content}".strip()
+
+
+def get_total_checklist_items(lists: list[list[dict]]) -> int:
+    return sum(len(item_list) for item_list in lists)
+
+
+def get_reminder_display(reminder: dict) -> str:
+    when = reminder.get("when")
+    if isinstance(when, int):
+        return f"<t:{when}:R>"
+    return str(when)
+
+
+def get_reminder_destination(reminder: dict, guild: discord.Guild | None = None) -> str:
+    send_mode = reminder.get("send", "dm")
+    if send_mode == "channel":
+        channel_id = reminder.get("channel_id")
+        if channel_id and guild:
+            channel = guild.get_channel(channel_id)
+            return channel.mention if channel else f"<#{channel_id}>"
+        return "channel"
+    if send_mode == "both":
+        channel_id = reminder.get("channel_id")
+        if channel_id and guild:
+            channel = guild.get_channel(channel_id)
+            channel_text = channel.mention if channel else f"<#{channel_id}>"
+        else:
+            channel_text = "channel"
+        return f"{channel_text} and DM"
+    return "DM"
+
+
+def get_reminder_message_text(reminder: dict) -> str:
+    description = reminder.get("description", "").strip()
+    if description:
+        return description
+    return "No description provided."
+
+
+PENDING_POSTPONE_REMINDERS: dict[str, dict] = {}
+
+
+class ReminderPostponeModal(Modal):
+    def __init__(self, user_id: str, postpone_id: str, current_time: int):
+        super().__init__(title="Postpone Reminder")
+        self.user_id = user_id
+        self.postpone_id = postpone_id
+        self.time_input = TextInput(
+            label="New reminder time",
+            placeholder="in 1d 30m 10s or at yy/mm/dd hh:mm",
+            required=True,
+            default=f"at {datetime.utcfromtimestamp(current_time):%y/%m/%d %H:%M}",
+        )
+        self.add_item(self.time_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        data = PENDING_POSTPONE_REMINDERS.get(self.postpone_id)
+        if not data or str(interaction.user.id) != data["user_id"]:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This postpone link is no longer valid.", ephemeral=True)
+            return
+
+        reminder = data["reminder"]
+        new_time = parse_reminder_time(self.time_input.value)
+        if new_time is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid reminder time. Use in 1h or at 24/12/26 18:00.", ephemeral=True)
+            return
+
+        new_reminder = {
+            "name": reminder.get("name", "Reminder"),
+            "description": reminder.get("description", ""),
+            "when": new_time,
+            "send": reminder.get("send", "dm"),
+        }
+        if reminder.get("channel_id"):
+            new_reminder["channel_id"] = reminder["channel_id"]
+
+        reminders = get_user_reminders(str(self.user_id))
+        if len(reminders) >= MAX_USER_REMINDERS:
+            await interaction.response.send_message(
+                "<:disapprove:1517452151012589662> You can have up to 7 reminders at once.",
+                ephemeral=True,
+            )
+            return
+
+        reminders.append(new_reminder)
+        save_user_reminders(str(self.user_id), reminders)
+        PENDING_POSTPONE_REMINDERS.pop(self.postpone_id, None)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Reminder postponed to <t:{new_time}:F>.", ephemeral=True)
+
+
+class ReminderNotificationView(LayoutView):
+    def __init__(self, user_id: str, postpone_id: str, reminder: dict, mention_user: bool):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.postpone_id = postpone_id
+        self.reminder = reminder
+        self.mention_user = mention_user
+        self.build_components()
+
+    def build_components(self):
+        reminder_label = f"<:timer:1517996239583576194> {self.reminder.get('name', 'Reminder')}"
+        self.postpone_button = Button(label="Postpone", style=discord.ButtonStyle.secondary, custom_id=f"reminder_postpone:{self.postpone_id}")
+        self.postpone_button.callback = self.open_postpone
+
+        details = [
+            Section(reminder_label, accessory=self.postpone_button),
+            Separator(),
+            TextDisplay(get_reminder_message_text(self.reminder)),
+            TextDisplay(f"{get_reminder_display(self.reminder)}"),
+        ]
+        if self.mention_user:
+            details.append(TextDisplay(f"<@{self.user_id}>"))
+
+        container = Container(*details, accent_color=get_user_color_value(str(self.user_id)))
+        self.add_item(container)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != int(self.user_id):
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Only the reminder owner can postpone this reminder.", ephemeral=True)
+            return False
+        return True
+
+    async def open_postpone(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ReminderPostponeModal(self.user_id, self.postpone_id, self.reminder.get("when", int(datetime.now(timezone.utc).timestamp()))))
+
+
+async def deliver_reminder(user_id: str, reminder: dict):
+    user = bot.get_user(int(user_id)) if user_id.isdigit() else None
+    if not user:
+        try:
+            user = await bot.fetch_user(int(user_id))
+        except Exception:
+            user = None
+
+    postpone_id = uuid.uuid4().hex
+    PENDING_POSTPONE_REMINDERS[postpone_id] = {
+        "user_id": str(user_id),
+        "reminder": reminder,
+    }
+
+    send_mode = reminder.get("send", "dm")
+    if send_mode in {"dm", "both"} and user:
+        try:
+            await user.send(view=ReminderNotificationView(str(user_id), postpone_id, reminder, mention_user=False))
+        except Exception:
+            pass
+
+    if send_mode in {"channel", "both"}:
+        channel_id = reminder.get("channel_id")
+        if channel_id:
+            channel = bot.get_channel(int(channel_id)) if isinstance(channel_id, int) else None
+            if channel:
+                try:
+                    await channel.send(view=ReminderNotificationView(str(user_id), postpone_id, reminder, mention_user=True))
+                except Exception:
+                    pass
+
+
+@tasks.loop(minutes=1)
+async def reminder_loop():
+    settings = load_user_settings()
+    if not settings:
+        return
+
+    now = int(datetime.now(timezone.utc).timestamp())
+    changed = False
+
+    users = settings.get("users")
+    if not isinstance(users, dict):
+        return
+
+    for user_id, user_settings in list(users.items()):
+        reminders = user_settings.get("reminders")
+        if not isinstance(reminders, list):
+            continue
+
+        remaining_reminders = []
+        for reminder in reminders:
+            if not isinstance(reminder, dict):
+                continue
+            when = reminder.get("when")
+            if isinstance(when, int) and when <= now:
+                await deliver_reminder(user_id, reminder)
+                changed = True
+            else:
+                remaining_reminders.append(reminder)
+
+        if len(remaining_reminders) != len(reminders):
+            user_settings["reminders"] = remaining_reminders
+
+    if changed:
+        save_user_settings(settings)
+
+
+@reminder_loop.before_loop
+async def before_reminder_loop():
+    await bot.wait_until_ready()
+
+
+def is_valid_send_mode(value: str) -> bool:
+    return str(value).strip().lower() in {"dm", "channel", "both"}
+
+
+def normalize_send_mode(value: str) -> str:
+    return str(value).strip().lower() if is_valid_send_mode(value) else "dm"
+
+
+def get_list_title(list_index: int) -> str:
+    return f"List {list_index + 1}" if 0 <= list_index < 3 else "List"
+
+
+def get_list_header(user_id: int, list_index: int) -> str:
+    return f"<:list:1517497572770451567> Lists for {bot.get_user(user_id).display_name if bot.get_user(user_id) else str(user_id)}"
+
+
+def get_notes_header(user_id: int) -> str:
+    user = bot.get_user(user_id)
+    return f"<:edit:1517497568421085256> Notes for {user.display_name if user else str(user_id)}"
+
+
+def get_reminders_header(user_id: int) -> str:
+    user = bot.get_user(user_id)
+    return f"<:timer:1517996239583576194> Reminders for {user.display_name if user else str(user_id)}"
+
+
+def get_user_color_value(user_id: str) -> discord.Color:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    color_name = user_settings.get("color", "white")
+    color_map = {
+        "white": discord.Color.light_gray(),
+        "black": discord.Color.dark_gray(),
+        "red": discord.Color.red(),
+        "blue": discord.Color.blue(),
+        "green": discord.Color.green(),
+        "yellow": discord.Color.gold(),
+        "purple": discord.Color.purple(),
+        "orange": discord.Color.orange(),
+        "brown": discord.Color.dark_orange(),
+    }
+    return color_map.get(color_name, discord.Color.blurple())
+
+
 def get_user_has_leveled_up_before(user_id: str) -> bool:
     settings = load_user_settings()
     user_settings = get_user_settings_entry(settings, user_id)
@@ -1026,6 +1402,94 @@ def format_banner_username(name: str, limit: int = 17) -> str:
     if len(name) <= limit:
         return name
     return name[:limit] + "..."
+
+
+AFK_PREFIX = "[AFK]"
+AFK_MESSAGE_WINDOW_SECONDS = 60
+AFK_MESSAGE_LIMIT = 3
+afk_status: dict[str, dict[str, object]] = {}
+
+
+def get_afk_status_key(guild_id: int | str, user_id: int | str) -> str:
+    return f"{guild_id}:{user_id}"
+
+
+def build_afk_nickname(display_name: str) -> str:
+    base_nickname = display_name.strip()
+    if not base_nickname:
+        base_nickname = "AFK"
+
+    if len(base_nickname) + len(AFK_PREFIX) + 1 <= 32:
+        return f"{AFK_PREFIX} {base_nickname}"
+
+    max_base_length = max(0, 32 - len(AFK_PREFIX) - 1)
+    return f"{AFK_PREFIX} {base_nickname[:max_base_length].rstrip()}"
+
+
+async def set_afk_status(member: discord.Member, reason: str | None = None) -> bool:
+    key = get_afk_status_key(member.guild.id, member.id)
+    reason_text = (reason or "No reason provided.").strip() or "No reason provided."
+
+    existing_state = afk_status.get(key)
+    if existing_state:
+        existing_state["reason"] = reason_text
+        existing_state["message_times"] = [ts for ts in existing_state.get("message_times", []) if time.time() - ts <= AFK_MESSAGE_WINDOW_SECONDS]
+        return False
+
+    original_nickname = getattr(member, "display_name", None)
+    afk_status[key] = {
+        "reason": reason_text,
+        "original_nickname": original_nickname,
+        "message_times": [],
+    }
+
+    me = getattr(member.guild, "me", None)
+    can_manage_nicknames = bool(me and me.guild_permissions.manage_nicknames)
+
+    if not can_manage_nicknames:
+        add_bot_error_entry(
+            member.guild.id,
+            None,
+            member,
+            "afk nickname update",
+            PermissionError("Bot lacks manage_nicknames permission to update AFK nickname")
+        )
+        return True
+
+    try:
+        await member.edit(nick=build_afk_nickname(original_nickname or member.name), reason=f"AFK status enabled: {reason_text}")
+    except (discord.Forbidden, discord.HTTPException) as error:
+        add_bot_error_entry(member.guild.id, None, member, "afk nickname update", error)
+
+    return True
+
+
+async def clear_afk_status(member: discord.Member, channel: discord.abc.Messageable | None = None) -> None:
+    key = get_afk_status_key(member.guild.id, member.id)
+    state = afk_status.pop(key, None)
+    if not state:
+        return
+
+    original_nickname = state.get("original_nickname")
+    me = getattr(member.guild, "me", None)
+    if me and me.guild_permissions.manage_nicknames:
+        try:
+            await member.edit(nick=original_nickname or None, reason="AFK status removed")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+    if channel is not None:
+        try:
+            await channel.send(f"<:approve:1517452125687513158> **{member.display_name}** is no longer AFK.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+
+
+def get_afk_reason(entry: dict | None) -> str:
+    if not entry:
+        return "No reason provided."
+    reason = entry.get("reason")
+    return str(reason or "No reason provided.")
 
 
 def start_local_rpc_worker():
@@ -1314,7 +1778,7 @@ async def add_guild_warning(guild_id: str, member_id: int, reason: str, moderato
     return user_warnings, data
 
 
-async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: str, total_warnings: int | None = None, automod_triggered: bool = False) -> None:
+async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: str, total_warnings: int | None = None, automod_triggered: bool = False, sanction: str | None = None) -> None:
     if member.bot:
         return
 
@@ -1325,44 +1789,69 @@ async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: 
     if total_warnings is not None:
         description += f"\n**Total warnings:** {total_warnings}"
 
-    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
+    if sanction:
+        embed.add_field(name="Sanction", value=sanction, inline=True)
+
     try:
         await member.send(embed=embed)
     except (discord.Forbidden, discord.HTTPException):
         pass
 
 
-async def apply_warning_sanctions(member: discord.Member, guild: discord.Guild, total_warnings: int) -> None:
+async def send_honeypot_dm(member: discord.Member, guild: discord.Guild, channel: discord.abc.GuildChannel, sanction: str, message_preview: str) -> None:
+    if member.bot:
+        return
+
+    title = "<:honey:1524116282075512842> Sent a message in a honeypot channel"
+    description = f"**Server:** {guild.name}\n**Channel:** {getattr(channel, 'mention', str(channel.id))}\n**Action:** {sanction}"
+
+    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    embed.add_field(name="Message preview", value=message_preview, inline=False)
+
+    try:
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+async def apply_warning_sanctions(member: discord.Member, guild: discord.Guild, total_warnings: int) -> str | None:
     automod, data = get_guild_automod_config(str(guild.id))
     sanction_state = automod.setdefault("warning_sanction_state", {})
     member_key = str(member.id)
     last_applied = int(sanction_state.get(member_key, {}).get("last_applied_warns", 0))
     if total_warnings <= last_applied:
-        return
+        return None
 
     applicable = [
         rule for rule in automod.get("warning_sanctions", [])
         if isinstance(rule, dict) and int(rule.get("warns", 0)) <= total_warnings
     ]
     if not applicable:
-        return
+        return None
 
     rule = max(applicable, key=lambda rule: int(rule.get("warns", 0)))
     threshold = int(rule.get("warns", 0))
     action = str(rule.get("action", "timeout")).lower()
+    sanction_text = None
     try:
         if action == "timeout":
             duration_seconds = max(1, int(rule.get("duration_seconds", 86400)))
             timed_out_until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
             await member.edit(timed_out_until=timed_out_until, reason=f"Reached {threshold} warnings")
+            sanction_text = f"Timeout for {format_duration(duration_seconds)}"
         elif action == "kick":
             await member.kick(reason=f"Reached {threshold} warnings")
+            sanction_text = "Kick"
         elif action == "ban":
             await member.ban(reason=f"Reached {threshold} warnings")
+            sanction_text = "Ban"
     except (discord.Forbidden, discord.HTTPException):
         pass
+
     sanction_state[member_key] = {"last_applied_warns": total_warnings}
     save_guild_data(data)
+    return sanction_text
 
 
 async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: discord.Guild, channel: discord.abc.GuildChannel, message_content: str | None = None) -> bool:
@@ -1385,20 +1874,29 @@ async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: 
     if len(content_preview) > 500:
         content_preview = content_preview[:497] + "..."
 
+    if action == "timeout":
+        duration_seconds = max(1, int(sanction.get("duration_seconds", 86400)))
+        sanction_text = f"Timeout for {format_duration(duration_seconds)}"
+    elif action == "kick":
+        sanction_text = "Kick"
+    else:
+        sanction_text = "Ban"
+
+    await send_honeypot_dm(member, guild, channel, sanction_text, content_preview)
+
     for log_id in get_guild_admin_log_channel_ids(guild):
         log_channel = guild.get_channel(log_id)
         if log_channel is None:
             continue
         try:
             await log_channel.send(
-                f"**[HONEYPOT]** `{member.display_name}`: {content_preview}\n-# <:honey:1524116282075512842> **Honeypot triggered** by {member.mention} | Action: {action.title()}"
+                f"**[HONEYPOT]** `{member.display_name}`: {content_preview}\n-# <:honey:1524116282075512842> **Honeypot triggered** | Action: {action.title()}"
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
 
     try:
         if action == "timeout":
-            duration_seconds = max(1, int(sanction.get("duration_seconds", 86400)))
             timed_out_until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
             await member.edit(timed_out_until=timed_out_until, reason="Sent a message in the honeypot channel")
         elif action == "kick":
@@ -1473,8 +1971,15 @@ async def on_automod_action(action: discord.AutoModAction) -> None:
             member = None
 
     if member is not None and not member.bot:
-        await send_warning_dm(member, guild, f"Discord AutoMod blocked a message via rule {action.rule_id}", total_warnings=len(warnings), automod_triggered=True)
-        await apply_warning_sanctions(member, guild, len(warnings))
+        sanction_text = await apply_warning_sanctions(member, guild, len(warnings))
+        await send_warning_dm(
+            member,
+            guild,
+            f"Discord AutoMod blocked a message via rule {action.rule_id}",
+            total_warnings=len(warnings),
+            automod_triggered=True,
+            sanction=sanction_text
+        )
 
     if member is None:
         return
@@ -2244,6 +2749,8 @@ async def on_ready():
         giveaway_loop.start()
     if not giveaway_refresh_loop.is_running():
         giveaway_refresh_loop.start()
+    if not reminder_loop.is_running():
+        reminder_loop.start()
     bot.loop.create_task(blacklist_startup_cleanup())
 
 
@@ -2251,6 +2758,31 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
+
+    if message.guild and message.mentions:
+        for mention in message.mentions:
+            if mention.id == message.author.id or mention.bot:
+                continue
+
+            afk_key = get_afk_status_key(message.guild.id, mention.id)
+            afk_entry = afk_status.get(afk_key)
+            if afk_entry:
+                try:
+                    await message.reply(f"<:warning:1517452174991556758> **{mention.display_name}** is AFK right now. Reason: {get_afk_reason(afk_entry)}")
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+                break
+
+    if message.guild:
+        afk_key = get_afk_status_key(message.guild.id, message.author.id)
+        afk_entry = afk_status.get(afk_key)
+        if afk_entry:
+            now = time.time()
+            timestamps = [timestamp for timestamp in afk_entry.get("message_times", []) if now - timestamp <= AFK_MESSAGE_WINDOW_SECONDS]
+            timestamps.append(now)
+            afk_entry["message_times"] = timestamps
+            if len(timestamps) >= AFK_MESSAGE_LIMIT:
+                await clear_afk_status(message.author, channel=message.channel)
 
     if message.guild:
         if await apply_honeypot_sanction(message.author, message.guild, message.channel, message.content):
@@ -2790,7 +3322,7 @@ async def define_word(interaction: discord.Interaction, word: str):
                 
                 if response.status == 404:
                     return await interaction.followup.send(
-                        f"<:dissaprouve:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!", 
+                        f"<:disapprove:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!", 
                         ephemeral=True
                     )
                 
@@ -2836,7 +3368,7 @@ async def define_word(interaction: discord.Interaction, word: str):
         
     except Exception as e:
         print(f"Error executing /def command: {e}")
-        await interaction.followup.send("<:dissaprouve:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
+        await interaction.followup.send("<:disapprove:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
 
 
 @bot.tree.command(name="encode-decode", description="Encode or decode text using various methods (Base64, Base32, Base16, Binary)")
@@ -2920,6 +3452,47 @@ async def translate(interaction: discord.Interaction, text: str, to_language: st
         await interaction.followup.send(content=translated_text)
     except Exception as e:
         await interaction.followup.send(f"<:disapprove:1517452151012589662> Translation failed. Please ensure you used valid ISO language codes! Error: {e}", ephemeral=True)
+
+
+@bot.tree.command(name="gif", description="Convert an image attachment into a GIF file")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+@app_commands.describe(image="The image to convert to GIF")
+async def gif(interaction: discord.Interaction, image: discord.Attachment):
+    await interaction.response.defer()
+
+    if not image:
+        await interaction.followup.send("<:disapprove:1517452151012589662> Please attach an image to convert.", ephemeral=True)
+        return
+
+    try:
+        image_bytes = await image.read()
+        with Image.open(io.BytesIO(image_bytes)) as img:
+            if getattr(img, "is_animated", False):
+                frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
+                buffer = io.BytesIO()
+                frames[0].save(
+                    buffer,
+                    format="GIF",
+                    save_all=True,
+                    append_images=frames[1:],
+                    loop=0,
+                    duration=img.info.get("duration", 100),
+                    disposal=2,
+                )
+            else:
+                converted = img.convert("RGBA")
+                buffer = io.BytesIO()
+                converted.save(buffer, format="GIF", optimize=True)
+
+            buffer.seek(0)
+            await interaction.followup.send(file=discord.File(buffer, filename="converted.gif"))
+
+    except Exception as e:
+        await interaction.followup.send(
+            f"<:disapprove:1517452151012589662> Failed to convert the image to GIF. Please make sure the file is a valid image. Error: {e}",
+            ephemeral=True
+        )
 
 
 @bot.tree.command(name="song", description="Manage song playback and queue")
@@ -3068,6 +3641,29 @@ async def voice_leave(interaction: discord.Interaction):
         await interaction.response.send_message("<:disapprove:1517452151012589662> I'm not connected to a voice channel!", ephemeral=True)
 
 
+@bot.tree.command(name="afk", description="Set yourself as AFK with a reason")
+@app_commands.allowed_installs(guilds=True, users=False)
+@app_commands.allowed_contexts(guilds=True, dms=False, private_channels=True)
+@app_commands.describe(reason="Why you're going AFK")
+async def afk_command(interaction: discord.Interaction, reason: str = None):
+    if interaction.guild is None:
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    member = interaction.user
+    if not isinstance(member, discord.Member):
+        await interaction.response.send_message("This command can only be used in a server.", ephemeral=True)
+        return
+
+    reason_text = (reason or "No reason provided.").strip() or "No reason provided."
+    already_afk = await set_afk_status(member, reason_text)
+    if already_afk:
+        await interaction.response.send_message(f"<:afk:1525440143245180970> {member.mention} is now AFK. Reason: {reason_text}")
+    else:
+        current_reason = get_afk_reason(afk_status.get(get_afk_status_key(member.guild.id, member.id)))
+        await interaction.response.send_message(f"<:warning:1517452174991556758> You are already AFK. Reason: {current_reason}", ephemeral=True)
+
+
 @bot.tree.command(name="roll", description="Roll a 6-sided die")
 @app_commands.allowed_installs(guilds=True, users=True)
 @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
@@ -3110,7 +3706,7 @@ async def serverinfo(interaction: discord.Interaction):
     embed.add_field(name="<:multi:1518348755261460661> Roles", value=f"{len(guild.roles)}", inline=True)
     embed.add_field(name="\n<:graph:1517584522877866065> Members", value=" ", inline=False)
     embed.add_field(name="<:approuve:1517452125687513158> Real Accounts", value=str(human_count), inline=True)
-    embed.add_field(name="<:dissaprouve:1517452151012589662> Bots", value=str(bot_count), inline=True)
+    embed.add_field(name="<:disapprove:1517452151012589662> Bots", value=str(bot_count), inline=True)
     embed.add_field(name="<:warning:1517452174991556758> Total", value=str(total_count), inline=True)
     if guild.icon:
         embed.set_thumbnail(url=guild.icon.url)
@@ -3198,6 +3794,8 @@ async def channelinfo(interaction: discord.Interaction):
                 continue
     locked_channels = "\n".join(locked_channels_list) if locked_channels_list else "None"
 
+    honeypot_channel = fmt_channel(guild_config.get("honeypot_channel_id"))
+
     embed = discord.Embed(title=f"<:drawer:1517497564189036574> Configured Channels for {guild.name}", color=discord.Color.blurple())
     embed.add_field(name="<:plus:1518348756570079262> Welcome Channel", value=welcome, inline=False)
     embed.add_field(name="<:minus:1518348754111959150> Goodbye Channel", value=goodbye, inline=False)
@@ -3206,6 +3804,7 @@ async def channelinfo(interaction: discord.Interaction):
     embed.add_field(name="<:list:1517497572770451567> Counter Channels", value=counter_channels, inline=False)
     embed.add_field(name="<:unlocked:1517574880034558102> Admin Log Channel", value=admin_log_channel, inline=False)
     embed.add_field(name="<:locked:1517574877257924809> Locked Channels", value=locked_channels, inline=False)
+    embed.add_field(name="<:honey:1524116282075512842> Honeypot Channel", value=honeypot_channel, inline=False)
     embed.set_footer(text=f"Run /settings and go to channel settings to change these settings.")
 
     await interaction.response.send_message(embed=embed)
@@ -3889,7 +4488,7 @@ async def ban(interaction: discord.Interaction, member: discord.Member | None = 
     if not target_member.bot:
         try:
             dm_embed = discord.Embed(
-                title="<:dissaprouve:1517452151012589662> You have been banned",
+                title="<:disapprove:1517452151012589662> You have been banned",
                 description=f"**Server:** {interaction.guild.name}\n**Reason:** {reason}",
                 color=discord.Color.red()
             )
@@ -3948,18 +4547,27 @@ async def warn_adm(
             moderator_name=str(interaction.user),
         )
 
-        if not member.bot:
-            await send_warning_dm(member, interaction.guild, reason, total_warnings=len(warnings))
-
         total = len(warnings)
-        await apply_warning_sanctions(member, interaction.guild, total)
+        sanction_text = await apply_warning_sanctions(member, interaction.guild, total)
+
+        if not member.bot:
+            await send_warning_dm(
+                member,
+                interaction.guild,
+                reason,
+                total_warnings=total,
+                sanction=sanction_text
+            )
+
         confirm_embed = discord.Embed(
             title="<:warning:1517452174991556758> Warning added",
             description=f"**{format_user_reference(member)}** has been warned.",
-            color=discord.Color.orange()
+            color=discord.Color.yellow()
         )
         confirm_embed.add_field(name="Reason", value=reason, inline=False)
-        confirm_embed.add_field(name="Total warnings", value=str(total), inline=True)
+        confirm_embed.add_field(name="Total warnings", value=str(total), inline=False)
+        if sanction_text:
+            confirm_embed.add_field(name="Sanction", value=sanction_text, inline=True)
         await interaction.response.send_message(embed=confirm_embed)
         return
 
@@ -4354,7 +4962,7 @@ async def adm_role_for(
         embed.add_field(name="<:list:1517497572770451567> Processed", value=f"{processed}/{len(affected_members)} ({progress_percent:.1f}%)", inline=True)
         embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
         embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
-        embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+        embed.add_field(name="<:disapprove:1517452151012589662> Failed", value=str(failed), inline=True)
         return embed
 
     async def update_progress_message(message: discord.Message):
@@ -4409,7 +5017,7 @@ async def adm_role_for(
     embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
     embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
     if failed:
-        embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+        embed.add_field(name="<:disapprove:1517452151012589662> Failed", value=str(failed), inline=True)
 
     try:
         await progress_message.edit(content=f"<:approve:1517452125687513158> Finished updating roles.", embed=embed)
@@ -4810,7 +5418,10 @@ async def resume_command(interaction: discord.Interaction, channel: discord.Text
 
 async def create_welcome_card(member):
     base_path = os.path.dirname(__file__)
-    bg_path = os.path.join(base_path, "welcome_bg.png")
+    style = get_user_banner_style(str(member.id))
+    alt_bg = os.path.join(base_path, "welcome_bg_alt.png")
+    default_bg = os.path.join(base_path, "welcome_bg.png")
+    bg_path = alt_bg if style == "alt" and os.path.exists(alt_bg) else default_bg
     font_path = os.path.join(base_path, "Minecraft.ttf")
 
     if not os.path.exists(bg_path):
@@ -6645,7 +7256,10 @@ async def add_xp(member: discord.Member, guild: discord.Guild, xp_to_add: int, a
 
 async def create_levelup_card(member: discord.Member, level: int):
     base_path = os.path.dirname(__file__)
-    bg_path = os.path.join(base_path, "levelup_bg.png")
+    style = get_user_banner_style(str(member.id))
+    alt_bg = os.path.join(base_path, "levelup_bg_alt.png")
+    default_bg = os.path.join(base_path, "levelup_bg.png")
+    bg_path = alt_bg if style == "alt" and os.path.exists(alt_bg) else default_bg
     font_path = os.path.join(base_path, "Minecraft.ttf")
     
     if not os.path.exists(bg_path):
@@ -6947,6 +7561,16 @@ async def set_bot_activity(ctx: commands.Context, *, new_value: str = ""):
     await ctx.send(f"Updated ACTIVITY in .env to `{ACTIVITY_TEXT}`.")
 
 
+@bot.command(name="backups")
+async def backups_command(ctx: commands.Context):
+    if not await bot.is_owner(ctx.author):
+        return await ctx.send(F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
+
+    view = BackupListView(ctx.author.id)
+    message = await ctx.send(view=view)
+    view.message = message
+
+
 @bot.command(name="shutdown")
 async def own_shutdown(ctx: commands.Context, *, args: str = ""):
     if not await bot.is_owner(ctx.author):
@@ -7138,6 +7762,7 @@ class SettingsMenuView(LayoutView):
                 interaction.user.id,
                 current_color=user_settings.get("color", "white"),
                 current_pings=user_settings.get("user_pings", True),
+                current_style=user_settings.get("banner_style", "normal"),
             )
             await interaction.response.edit_message(view=new_view)
 
@@ -7178,12 +7803,785 @@ class SettingsMenuView(LayoutView):
         self.add_item(container)
 
 
+class NotesMenuView(LayoutView):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.notes_button = Button(label="Open", style=discord.ButtonStyle.primary, custom_id="notes_menu_notes")
+        self.reminders_button = Button(label="Open", style=discord.ButtonStyle.primary, custom_id="notes_menu_reminders")
+        self.checklists_button = Button(label="Open", style=discord.ButtonStyle.primary, custom_id="notes_menu_checklists")
+
+        async def open_notes(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=NotesView(self.user_id))
+
+        async def open_reminders(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=RemindersView(self.user_id))
+
+        async def open_checklists(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=ChecklistView(self.user_id))
+
+        self.notes_button.callback = open_notes
+        self.reminders_button.callback = open_reminders
+        self.checklists_button.callback = open_checklists
+        user = bot.get_user(self.user_id)
+        username = user.display_name if user else str(self.user_id)
+        self.add_item(Container(
+            TextDisplay(f"<:gear:1517576939097952496> **Notes menu for {username}**"),
+            Separator(),
+            Section("<:edit:1517497568421085256> Notes", accessory=self.notes_button),
+            Section("<:list:1517497572770451567> Checklists", accessory=self.checklists_button),            
+            Section("<:timer:1517996239583576194> Reminders", accessory=self.reminders_button),
+            Separator(),
+            TextDisplay("Found a bug ? Report it in the [support server](https://discord.gg/FSBPvc9zqY)"),
+            accent_color=get_user_color_value(str(self.user_id)),
+        ))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This menu is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class NotesView(LayoutView):
+    def __init__(self, user_id: int, note_index: int = 0):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.note_index = max(0, min(note_index, MAX_USER_NOTES - 1))
+        self.notes = get_user_notes(str(self.user_id))
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        current_note = self.notes[self.note_index] if self.note_index < len(self.notes) else ""
+        note_text = current_note or "*No note written yet.*"
+
+        self.edit_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="notes_edit")
+        self.share_button = Button(label="Share", style=discord.ButtonStyle.success, custom_id="notes_share", disabled=not bool(current_note.strip()))
+        self.cycle_button = Button(label="Next note", style=discord.ButtonStyle.secondary, custom_id="notes_cycle")
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="notes_back")
+
+        async def edit_note(interaction: discord.Interaction):
+            await interaction.response.send_modal(NoteEditModal(self.user_id, self.note_index, current_note))
+
+        async def share_note(interaction: discord.Interaction):
+            owner = bot.get_user(self.user_id)
+            owner_name = owner.display_name if owner else str(self.user_id)
+            await interaction.response.send_message(
+                view=SharedNoteView(self.user_id, owner_name, note_text),
+                ephemeral=False,
+            )
+
+        async def cycle_note(interaction: discord.Interaction):
+            new_index = (self.note_index + 1) % MAX_USER_NOTES
+            await interaction.response.edit_message(view=NotesView(self.user_id, new_index))
+
+        async def back_to_menu(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=NotesMenuView(self.user_id))
+
+        self.edit_button.callback = edit_note
+        self.share_button.callback = share_note
+        self.cycle_button.callback = cycle_note
+        self.back_button.callback = back_to_menu
+
+        self.add_item(Container(
+            TextDisplay(get_notes_header(self.user_id)),
+            Separator(),
+            TextDisplay(note_text),
+            accent_color=get_user_color_value(str(self.user_id)),
+        ))
+        self.add_item(discord.ui.ActionRow(self.edit_button, self.share_button, self.cycle_button, self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This notes panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class NoteEditModal(Modal):
+    def __init__(self, user_id: int, note_index: int, current_text: str = ""):
+        super().__init__(title="Edit Note")
+        self.user_id = user_id
+        self.note_index = note_index
+        self.note_input = TextInput(
+            label="Note",
+            style=discord.TextStyle.long,
+            default=current_text,
+            required=False,
+            max_length=1000,
+        )
+        self.add_item(self.note_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        notes = get_user_notes(str(self.user_id))
+        while len(notes) < MAX_USER_NOTES:
+            notes.append("")
+        notes[self.note_index] = self.note_input.value.strip()
+        save_user_notes(str(self.user_id), notes)
+        await interaction.response.edit_message(view=NotesView(self.user_id, self.note_index))
+
+
+class SharedNoteView(LayoutView):
+    def __init__(self, owner_id: int, owner_name: str, note_text: str):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.owner_name = owner_name
+        self.note_text = note_text
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        title = f"<:edit:1517497568421085256> {self.owner_name}'s Note"
+        self.add_item(Container(
+            TextDisplay(title),
+            Separator(),
+            TextDisplay(self.note_text or "*No note written yet.*"),
+            accent_color=get_user_color_value(str(self.owner_id)),
+        ))
+
+
+class SharedChecklistView(LayoutView):
+    def __init__(self, owner_id: int, owner_name: str, item_lines: list[str]):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.owner_name = owner_name
+        self.item_lines = item_lines or ["No list items yet."]
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        title = f"<:list:1517497572770451567> {self.owner_name}'s Checklist"
+        self.add_item(Container(
+            TextDisplay(title),
+            Separator(),
+            TextDisplay("\n".join(self.item_lines)),
+            accent_color=get_user_color_value(str(self.owner_id)),
+        ))
+
+
+class ReminderModal(Modal):
+    def __init__(self, user_id: int, settings_message: discord.Message, existing_index: int | None = None):
+        title = "Edit Reminder" if existing_index is not None else "Create Reminder"
+        super().__init__(title=title)
+        self.user_id = user_id
+        self.settings_message = settings_message
+        self.existing_index = existing_index
+        self.name_input = TextInput(label="Reminder name", placeholder="Brief title", required=True, max_length=100)
+        self.description_input = TextInput(label="Reminder description", style=discord.TextStyle.long, required=False, max_length=400)
+        self.time_input = TextInput(label="Reminder time", placeholder="in 1d 30m 10s or at yy/mm/dd hh:mm", required=True)
+        self.send_input = TextInput(label="Send in channel/dm/both", placeholder="dm, channel, or both", required=True)
+        self.add_item(self.name_input)
+        self.add_item(self.description_input)
+        self.add_item(self.time_input)
+        self.add_item(self.send_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        name = self.name_input.value.strip() or "Reminder"
+        description = self.description_input.value.strip()
+        when = parse_reminder_time(self.time_input.value)
+        send = normalize_send_mode(self.send_input.value)
+
+        if when is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Invalid reminder time. Use in 1h or at 24/12/26 18:00.", ephemeral=True)
+            return
+
+        reminder = {
+            "name": name,
+            "description": description,
+            "when": when,
+            "send": send,
+        }
+
+        if self.existing_index is None and not can_add_user_reminder(str(self.user_id)):
+            await interaction.response.send_message(
+                "<:disapprove:1517452151012589662> You can have up to 7 reminders at once.",
+                ephemeral=True,
+            )
+            return
+
+        if send in {"channel", "both"}:
+            guild = interaction.guild
+            if not guild:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Channel reminders require server context.", ephemeral=True)
+                return
+
+            await interaction.response.send_message(
+                "Select the channel for this reminder:",
+                view=ChannelSelectorView(self.user_id, guild, "Select reminder channel", self.on_channel_selected, self.settings_message),
+                ephemeral=True,
+            )
+            self.pending_reminder = reminder
+            return
+
+        reminders = get_user_reminders(str(self.user_id))
+        if self.existing_index is None:
+            reminders.append(reminder)
+            saved_text = f"<:approve:1517452125687513158> Reminder saved for <t:{when}:F>."
+        else:
+            if 0 <= self.existing_index < len(reminders):
+                reminders[self.existing_index] = reminder
+            saved_text = f"<:approve:1517452125687513158> Reminder updated for <t:{when}:F>."
+        save_user_reminders(str(self.user_id), reminders)
+        try:
+            await interaction.response.edit_message(view=RemindersView(self.user_id))
+        except Exception:
+            try:
+                await self.settings_message.edit(view=RemindersView(self.user_id))
+            except Exception:
+                pass
+        await safe_send(interaction, saved_text, ephemeral=True)
+
+    async def on_channel_selected(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        reminder = self.pending_reminder
+        reminder["channel_id"] = channel.id
+        reminders = get_user_reminders(str(self.user_id))
+        if self.existing_index is None and len(reminders) >= MAX_USER_REMINDERS:
+            await safe_send(
+                interaction,
+                "<:disapprove:1517452151012589662> You can have up to 7 reminders at once.",
+                ephemeral=True,
+            )
+            return
+
+        if self.existing_index is None:
+            reminders.append(reminder)
+        else:
+            if 0 <= self.existing_index < len(reminders):
+                reminders[self.existing_index] = reminder
+        save_user_reminders(str(self.user_id), reminders)
+        try:
+            await interaction.response.edit_message(view=RemindersView(self.user_id))
+        except Exception:
+            try:
+                await self.settings_message.edit(view=RemindersView(self.user_id))
+            except Exception:
+                pass
+        await safe_send(interaction, f"<:approve:1517452125687513158> Reminder saved for <t:{reminder['when']}:F>.", ephemeral=True)
+
+
+class RemindersView(LayoutView):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.reminders = get_user_reminders(str(user_id))
+        self.build_components()
+
+
+class ReminderActionModal(Modal):
+    def __init__(self, user_id: int, settings_message: discord.Message, action: str):
+        title = "Edit reminder" if action == "edit" else "Delete reminder"
+        super().__init__(title=title)
+        self.user_id = user_id
+        self.settings_message = settings_message
+        self.action = action
+        self.reminder_input = TextInput(label="Reminder number or name", placeholder="1 or reminder name", required=True, max_length=100)
+        self.add_item(self.reminder_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reminders = get_user_reminders(str(self.user_id))
+        if not reminders:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> You have no reminders yet.", ephemeral=True)
+            return
+
+        index = find_reminder_index(reminders, self.reminder_input.value)
+        if index is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Reminder not found. Use number or exact name.", ephemeral=True)
+            return
+
+        if self.action == "delete":
+            reminders.pop(index)
+            save_user_reminders(str(self.user_id), reminders)
+            try:
+                await interaction.response.edit_message(view=RemindersView(self.user_id))
+            except Exception:
+                try:
+                    await self.settings_message.edit(view=RemindersView(self.user_id))
+                except Exception:
+                    pass
+            await safe_send(interaction, "<:trash:1517497581058527404> Reminder deleted.", ephemeral=True)
+            return
+
+        reminder = reminders[index]
+        await interaction.response.send_message(
+            "Reminder found. Click below to continue editing.",
+            view=ReminderEditLaunchView(self.user_id, self.settings_message, index, reminder),
+            ephemeral=True,
+        )
+
+
+class ReminderShareModal(Modal):
+    def __init__(self, user_id: int, settings_message: discord.Message):
+        super().__init__(title="Share reminder")
+        self.user_id = user_id
+        self.settings_message = settings_message
+        self.reminder_input = TextInput(label="Reminder number or name", placeholder="1 or reminder name", required=True, max_length=100)
+        self.add_item(self.reminder_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        reminders = get_user_reminders(str(self.user_id))
+        if not reminders:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> You have no reminders yet.", ephemeral=True)
+            return
+
+        index = find_reminder_index(reminders, self.reminder_input.value)
+        if index is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Reminder not found. Use number or exact name.", ephemeral=True)
+            return
+
+        reminder = reminders[index]
+        destination = get_reminder_destination(reminder, interaction.guild)
+        reminder_text = get_reminder_message_text(reminder)
+        reminder_name = reminder.get("name", "Reminder")
+
+        owner = bot.get_user(self.user_id)
+        creator_name = owner.display_name if owner else str(self.user_id)
+        await interaction.response.send_message(
+            view=SharedReminderView(self.user_id, creator_name, reminder),
+            ephemeral=False,
+        )
+
+
+class SharedReminderView(LayoutView):
+    def __init__(self, owner_id: int, creator_name: str, reminder: dict):
+        super().__init__(timeout=None)
+        self.owner_id = owner_id
+        self.creator_name = creator_name
+        self.reminder = reminder
+        self.save_button = Button(label="Add to personal reminders", style=discord.ButtonStyle.primary, custom_id="shared_reminder_add")
+        self.save_button.callback = self.add_reminder
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        title = self.reminder.get("name", "Reminder")
+        description = self.reminder.get("description", "").strip() or "No description provided."
+        when = get_reminder_display(self.reminder)
+        destination = get_reminder_destination(self.reminder, None)
+
+        self.add_item(Container(
+            TextDisplay(f"<:timer:1517996239583576194> {title}"),
+            TextDisplay(description),
+            Separator(),
+            TextDisplay(f"When: {when}"),
+            TextDisplay(f"Sent in: {destination}"),
+            TextDisplay(f"Reminder creator: {self.creator_name}"),
+            accent_color=get_user_color_value(str(self.owner_id)),
+        ))
+        self.add_item(discord.ui.ActionRow(self.save_button))
+
+    async def add_reminder(self, interaction: discord.Interaction):
+        user_reminders = get_user_reminders(str(interaction.user.id))
+        if len(user_reminders) >= MAX_USER_REMINDERS:
+            await interaction.response.send_message(
+                "<:disapprove:1517452151012589662> You can have up to 7 reminders at once.",
+                ephemeral=True,
+            )
+            return
+
+        if any(
+            existing.get("name") == self.reminder.get("name")
+            and existing.get("when") == self.reminder.get("when")
+            and existing.get("send") == self.reminder.get("send")
+            and existing.get("description", "") == self.reminder.get("description", "")
+            and existing.get("channel_id") == self.reminder.get("channel_id")
+            for existing in user_reminders
+        ):
+            await interaction.response.send_message("<:approve:1517452125687513158> This reminder is already in your personal reminders.", ephemeral=True)
+            return
+
+        reminder_copy = self.reminder.copy()
+        original_description = reminder_copy.get("description", "").strip()
+        if original_description:
+            reminder_copy["description"] = f"{original_description} (by {self.creator_name})"
+        else:
+            reminder_copy["description"] = f"by {self.creator_name}"
+
+        user_reminders.append(reminder_copy)
+        save_user_reminders(str(interaction.user.id), user_reminders)
+        await interaction.response.send_message("<:approve:1517452125687513158> Reminder added to your personal reminders.", ephemeral=True)
+
+
+class ReminderEditLaunchView(discord.ui.View):
+    def __init__(self, user_id: int, settings_message: discord.Message, index: int, reminder: dict):
+        super().__init__(timeout=120)
+        self.user_id = user_id
+        self.settings_message = settings_message
+        self.index = index
+        self.reminder = reminder
+
+        self.open_button = Button(label="Open edit modal", style=discord.ButtonStyle.primary, custom_id="open_reminder_edit")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="cancel_reminder_edit")
+
+        self.open_button.callback = self.open_edit
+        self.cancel_button.callback = self.cancel
+
+        self.add_item(self.open_button)
+        self.add_item(self.cancel_button)
+
+    async def open_edit(self, interaction: discord.Interaction):
+        modal = ReminderModal(self.user_id, self.settings_message, existing_index=self.index)
+        modal.name_input.default = self.reminder.get("name", "")
+        modal.description_input.default = self.reminder.get("description", "")
+        reminder_when = self.reminder.get("when")
+        if isinstance(reminder_when, int):
+            try:
+                modal.time_input.default = f"at {datetime.utcfromtimestamp(reminder_when):%y/%m/%d %H:%M}"
+            except (OSError, OverflowError, ValueError):
+                modal.time_input.default = str(reminder_when)
+        else:
+            modal.time_input.default = str(reminder_when)
+        modal.send_input.default = self.reminder.get("send", "dm")
+        await interaction.response.send_modal(modal)
+
+    async def cancel(self, interaction: discord.Interaction):
+        await interaction.response.send_message("Reminder edit cancelled.", ephemeral=True)
+
+
+class RemindersView(LayoutView):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.reminders = get_user_reminders(str(user_id))
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        reminder_lines = []
+        for index, reminder in enumerate(self.reminders):
+            destination = get_reminder_destination(reminder, None)
+            reminder_lines.append(f"{index + 1}. {reminder.get('name', 'Reminder')} : {get_reminder_display(reminder)} [{destination}]")
+            if reminder.get("description"):
+                reminder_lines.append(reminder.get("description", ""))
+            reminder_lines.append("")
+
+        notice = "No reminders set yet." if not reminder_lines else "\n".join(reminder_lines)
+
+        self.create_button = Button(label="Create", style=discord.ButtonStyle.success, custom_id="reminder_create")
+        self.edit_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="reminder_edit", disabled=not bool(self.reminders))
+        self.delete_button = Button(label="Delete", style=discord.ButtonStyle.danger, custom_id="reminder_delete", disabled=not bool(self.reminders)) 
+        self.share_button = Button(label="Share", style=discord.ButtonStyle.success, custom_id="reminder_share", disabled=not bool(self.reminders))
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="reminder_back")
+
+        async def create_reminder(interaction: discord.Interaction):
+            await interaction.response.send_modal(ReminderModal(self.user_id, interaction.message))        
+
+        async def edit_reminder(interaction: discord.Interaction):
+            await interaction.response.send_modal(ReminderActionModal(self.user_id, interaction.message, action="edit"))
+
+        async def delete_reminder(interaction: discord.Interaction):
+            await interaction.response.send_modal(ReminderActionModal(self.user_id, interaction.message, action="delete"))
+
+        async def share_reminder(interaction: discord.Interaction):
+            await interaction.response.send_modal(ReminderShareModal(self.user_id, interaction.message))
+
+        async def back_to_menu(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=NotesMenuView(self.user_id))
+
+        self.create_button.callback = create_reminder
+        self.edit_button.callback = edit_reminder
+        self.delete_button.callback = delete_reminder
+        self.share_button.callback = share_reminder
+        self.back_button.callback = back_to_menu
+
+        self.add_item(Container(
+            TextDisplay(get_reminders_header(self.user_id)),
+            Separator(),
+            TextDisplay(notice),
+            accent_color=get_user_color_value(str(self.user_id)),
+        ))
+        self.add_item(discord.ui.ActionRow(self.create_button, self.edit_button, self.delete_button, self.share_button, self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This reminders panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class ChecklistView(LayoutView):
+    def __init__(self, user_id: int, page: int = 0):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.page = max(0, page)
+        self.lists = get_user_lists(str(self.user_id))
+        self.items = self.lists[0]
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        page_count = (len(self.items) + CHECKLIST_PAGE_SIZE - 1) // CHECKLIST_PAGE_SIZE
+        self.page = min(self.page, max(page_count - 1, 0))
+        page_items = self.items[self.page * CHECKLIST_PAGE_SIZE : (self.page + 1) * CHECKLIST_PAGE_SIZE]
+
+        item_lines = [format_checklist_item(item, self.page * CHECKLIST_PAGE_SIZE + idx) for idx, item in enumerate(page_items)]
+        if not item_lines:
+            item_lines = ["No list items yet."]
+
+        self.edit_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="checklist_edit")
+        self.share_button = Button(label="Share", style=discord.ButtonStyle.success, custom_id="checklist_share", disabled=not bool(self.items))
+        self.cycle_button = Button(label="Next page", style=discord.ButtonStyle.secondary, custom_id="checklist_cycle", disabled=self.page >= page_count - 1)
+        self.back_button = Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="checklist_back")
+
+        async def edit_list(interaction: discord.Interaction):
+            await interaction.response.send_message(
+                view=ChecklistActionView(self.user_id, self.page, interaction.message),
+                ephemeral=True,
+            )
+
+        async def share_list(interaction: discord.Interaction):
+            owner = bot.get_user(self.user_id)
+            owner_name = owner.display_name if owner else str(self.user_id)
+            await interaction.response.send_message(
+                view=SharedChecklistView(self.user_id, owner_name, item_lines),
+                ephemeral=False,
+            )
+
+        async def cycle_page(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=ChecklistView(self.user_id, self.page + 1))
+
+        async def back_to_menu(interaction: discord.Interaction):
+            await interaction.response.edit_message(view=NotesMenuView(self.user_id))
+
+        self.edit_button.callback = edit_list
+        self.share_button.callback = share_list
+        self.cycle_button.callback = cycle_page
+        self.back_button.callback = back_to_menu
+
+        header_text = f"<:list:1517497572770451567> Lists for {bot.get_user(self.user_id).display_name if bot.get_user(self.user_id) else str(self.user_id)}"
+        self.add_item(Container(
+            TextDisplay(header_text),
+            Separator(),
+            TextDisplay("\n".join(item_lines)),
+            accent_color=get_user_color_value(str(self.user_id)),
+        ))
+        self.add_item(discord.ui.ActionRow(self.edit_button, self.share_button, self.cycle_button, self.back_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This checklist panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class ChecklistActionView(LayoutView):
+    def __init__(self, user_id: int, page: int, settings_message: discord.Message):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.page = page
+        self.settings_message = settings_message
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.add_button = Button(label="Add", style=discord.ButtonStyle.success, custom_id="checklist_add")
+        self.mark_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id="checklist_edit")
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="checklist_remove")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="checklist_cancel")
+
+        async def add_item(interaction: discord.Interaction):
+            await interaction.response.send_modal(ChecklistAddModal(self.user_id, self.page, self.settings_message))
+
+        async def mark_item(interaction: discord.Interaction):
+            await interaction.response.send_modal(ChecklistMarkModal(self.user_id, self.page, self.settings_message))
+
+        async def remove_item(interaction: discord.Interaction):
+            await interaction.response.send_message(
+                view=ChecklistRemoveChoiceView(self.user_id, self.page, self.settings_message),
+                ephemeral=True,
+            )
+
+        async def cancel(interaction: discord.Interaction):
+            self.add_button.disabled = True
+            self.mark_button.disabled = True
+            self.remove_button.disabled = True
+            self.cancel_button.disabled = True
+            await interaction.response.edit_message(view=self)
+
+        self.add_button.callback = add_item
+        self.mark_button.callback = mark_item
+        self.remove_button.callback = remove_item
+        self.cancel_button.callback = cancel
+
+        self.add_item(discord.ui.ActionRow(self.add_button, self.mark_button, self.remove_button, self.cancel_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This checklist menu is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+async def refresh_checklist_message(interaction: discord.Interaction, view: discord.ui.View, settings_message: discord.Message | None = None):
+    if settings_message is None:
+        settings_message = interaction.message
+        if settings_message is None:
+            try:
+                settings_message = await interaction.original_response()
+            except (discord.NotFound, discord.HTTPException):
+                settings_message = None
+    if settings_message is None:
+        return
+    try:
+        await settings_message.edit(view=view)
+        return
+    except (discord.NotFound, discord.HTTPException):
+        pass
+    try:
+        await interaction.followup.edit_message(message_id=settings_message.id, view=view)
+        return
+    except Exception:
+        pass
+    try:
+        await interaction.edit_original_response(view=view)
+    except Exception:
+        pass
+
+
+class ChecklistAddModal(Modal):
+    def __init__(self, user_id: int, page: int, settings_message: discord.Message):
+        super().__init__(title="Add checklist item")
+        self.user_id = user_id
+        self.page = page
+        self.settings_message = settings_message
+        self.content_input = TextInput(label="Item content", style=discord.TextStyle.long, required=True, max_length=200)
+        self.color_input = TextInput(label="Mark color", placeholder="red, yellow, green, none", required=False, max_length=10)
+        self.add_item(self.content_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lists = get_user_lists(str(self.user_id))
+        item_list = lists[0]
+        if len(item_list) >= MAX_USER_LIST_ITEMS:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> You already have the maximum of 30 items.", ephemeral=True)
+            return
+        color = self.color_input.value.strip().lower()
+        if color == "":
+            color = "none"
+        if color not in {"red", "yellow", "green", "none"}:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Use red, yellow, green, or none.", ephemeral=True)
+            return
+        item_list.append({"content": self.content_input.value.strip(), "status": color})
+        save_user_lists(str(self.user_id), lists)
+        await interaction.response.send_message("<:approve:1517452125687513158> Checklist item added.", ephemeral=True)
+        await refresh_checklist_message(interaction, ChecklistView(self.user_id, self.page), self.settings_message)
+
+
+class ChecklistMarkModal(Modal):
+    def __init__(self, user_id: int, page: int, settings_message: discord.Message):
+        super().__init__(title="Edit checklist item")
+        self.user_id = user_id
+        self.page = page
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item ID or name to edit", required=True, max_length=100)
+        self.content_input = TextInput(label="New content", style=discord.TextStyle.long, required=False, max_length=200)
+        self.color_input = TextInput(label="Mark color", placeholder="red, yellow, green, remove", required=False, max_length=10)
+        self.add_item(self.item_input)
+        self.add_item(self.content_input)
+        self.add_item(self.color_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lists = get_user_lists(str(self.user_id))
+        item_list = lists[0]
+        index = find_checklist_item_index(item_list, self.item_input.value)
+        if index is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Item not found.", ephemeral=True)
+            return
+        new_content = self.content_input.value.strip()
+        new_color = self.color_input.value.strip().lower()
+        if not new_content and not new_color:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Provide new content, a mark color, or both.", ephemeral=True)
+            return
+        if new_content:
+            item_list[index]["content"] = new_content
+        if new_color:
+            if new_color not in {"red", "yellow", "green", "remove"}:
+                await interaction.response.send_message("<:disapprove:1517452151012589662> Use red, yellow, green, or remove.", ephemeral=True)
+                return
+            item_list[index]["status"] = "none" if new_color == "remove" else new_color
+        save_user_lists(str(self.user_id), lists)
+        await interaction.response.send_message("<:approve:1517452125687513158> Checklist item updated.", ephemeral=True)
+        await refresh_checklist_message(interaction, ChecklistView(self.user_id, self.page), self.settings_message)
+
+
+class ChecklistRemoveChoiceView(LayoutView):
+    def __init__(self, user_id: int, page: int, settings_message: discord.Message):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.page = page
+        self.settings_message = settings_message
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        self.remove_button = Button(label="Remove", style=discord.ButtonStyle.danger, custom_id="checklist_remove_single")
+        self.clear_button = Button(label="Clear all", style=discord.ButtonStyle.secondary, custom_id="checklist_clear_all")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="checklist_remove_cancel")
+
+        async def remove_single(interaction: discord.Interaction):
+            await interaction.response.send_modal(ChecklistRemoveModal(self.user_id, self.page, self.settings_message))
+
+        async def clear_all(interaction: discord.Interaction):
+            lists = get_user_lists(str(self.user_id))
+            lists[0] = []
+            save_user_lists(str(self.user_id), lists)
+            await refresh_checklist_message(interaction, ChecklistView(self.user_id, self.page), self.settings_message)
+            self.remove_button.disabled = True
+            self.clear_button.disabled = True
+            self.cancel_button.disabled = True
+            await interaction.response.edit_message(view=self)
+
+        async def cancel(interaction: discord.Interaction):
+            self.remove_button.disabled = True
+            self.clear_button.disabled = True
+            self.cancel_button.disabled = True
+            await interaction.response.edit_message(view=self)
+
+        self.remove_button.callback = remove_single
+        self.clear_button.callback = clear_all
+        self.cancel_button.callback = cancel
+        self.add_item(discord.ui.ActionRow(self.remove_button, self.clear_button, self.cancel_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This checklist action is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+
+class ChecklistRemoveModal(Modal):
+    def __init__(self, user_id: int, page: int, settings_message: discord.Message):
+        super().__init__(title="Remove checklist item")
+        self.user_id = user_id
+        self.page = page
+        self.settings_message = settings_message
+        self.item_input = TextInput(label="Item ID or name to remove", required=True, max_length=100)
+        self.add_item(self.item_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        lists = get_user_lists(str(self.user_id))
+        item_list = lists[0]
+        index = find_checklist_item_index(item_list, self.item_input.value)
+        if index is None:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Item not found.", ephemeral=True)
+            return
+        item_list.pop(index)
+        save_user_lists(str(self.user_id), lists)
+        await interaction.response.send_message("<:trash:1517497581058527404> Checklist item removed.", ephemeral=True)
+        await refresh_checklist_message(interaction, ChecklistView(self.user_id, self.page), self.settings_message)
+
+
 class UserSettingsView(LayoutView):
-    def __init__(self, user_id: int, current_color: str, current_pings: bool):
+    def __init__(self, user_id: int, current_color: str, current_pings: bool, current_style: str = "normal"):
         super().__init__(timeout=180)
         self.user_id = user_id
         self.current_color = current_color or "white"
         self.current_pings = current_pings
+        self.current_style = current_style if current_style in {"normal", "alt"} else "normal"
         self.build_components()
 
     def build_components(self):
@@ -7200,7 +8598,7 @@ class UserSettingsView(LayoutView):
             self.current_pings = not self.current_pings
             user_settings["user_pings"] = self.current_pings
             save_user_settings(settings)
-            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings))
+            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings, self.current_style))
 
         self.ping_button.callback = ping_callback
 
@@ -7221,9 +8619,25 @@ class UserSettingsView(LayoutView):
             self.current_color = self.color_select.values[0]
             user_settings["color"] = self.current_color
             save_user_settings(settings)
-            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings))
+            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings, self.current_style))
 
         self.color_select.callback = color_select_callback
+
+        self.banner_style_button = discord.ui.Button(
+            label=f"Switch to {'Alternate' if self.current_style == 'normal' else 'Normal'}",
+            style=discord.ButtonStyle.secondary,
+            custom_id="user_banner_style_toggle",
+        )
+
+        async def banner_style_button_callback(interaction: discord.Interaction):
+            settings = load_user_settings()
+            user_settings = get_user_settings_entry(settings, str(interaction.user.id))
+            self.current_style = "alt" if self.current_style == "normal" else "normal"
+            user_settings["banner_style"] = self.current_style
+            save_user_settings(settings)
+            await interaction.response.edit_message(view=UserSettingsView(self.user_id, self.current_color, self.current_pings, self.current_style))
+
+        self.banner_style_button.callback = banner_style_button_callback
 
         self.back_button = discord.ui.Button(label="Back", style=discord.ButtonStyle.secondary, custom_id="user_settings_back")
 
@@ -7237,6 +8651,10 @@ class UserSettingsView(LayoutView):
             TextDisplay("Adjust your personal preferences below."),
             Separator(),
             Section(f"<:bell:1517497562184024275> Ping notifications: {'Enabled' if self.current_pings else 'Disabled'}", accessory=self.ping_button),
+            Section(
+                f"<:frames:1517497568421085256> Banner style: {self.current_style.title()}",
+                accessory=self.banner_style_button,
+            ),
             TextDisplay(f"<:rainbow:1518708398772846722> User color: {COLOR_EMOJIS.get(self.current_color, self.current_color)} {self.current_color.title()}"),
             accent_color=get_user_color_value(str(self.user_id)),
         )
@@ -9618,6 +11036,14 @@ async def settings(interaction: discord.Interaction):
     await interaction.response.send_message(view=view, ephemeral=True)
 
 
+@bot.tree.command(name="notes-lists-reminders", description="Manage your notes, checklists, and reminders")
+@app_commands.allowed_installs(guilds=True, users=True)
+@app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+async def notes(interaction: discord.Interaction):
+    view = NotesMenuView(interaction.user.id)
+    await interaction.response.send_message(view=view, ephemeral=True)
+
+
 
 
 # -------------------------------------------------------------------------------------------------------------
@@ -9672,6 +11098,214 @@ def start_backup_scheduler(interval_seconds: int = 3600, root_dir: str = BASE_DI
     t.start()
     return t
 
+
+def get_backup_dir() -> Path:
+    return Path(BASE_DIR) / 'backups'
+
+
+def get_backup_files() -> list[Path]:
+    backup_dir = get_backup_dir()
+    if not backup_dir.exists():
+        return []
+    return sorted([p for p in backup_dir.iterdir() if p.is_file() and p.suffix == '.zip'], key=lambda p: p.name, reverse=True)
+
+
+def format_backup_entry(path: Path) -> str:
+    modified = datetime.fromtimestamp(path.stat().st_mtime).strftime('%Y-%m-%d %H:%M:%S')
+    size = path.stat().st_size
+    return f"{path.name} · {size} bytes · {modified}"
+
+
+class BackupListView(LayoutView):
+    def __init__(self, user_id: int, page: int = 1):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.page = page
+        self.message: discord.Message | None = None
+        self.backup_files = get_backup_files()
+        self.build_components()
+
+    def build_components(self):
+        self.clear_items()
+        total_backups = len(self.backup_files)
+        total_pages = max(1, math.ceil(total_backups / 5))
+        current_page = min(max(1, self.page), total_pages)
+        start_index = (current_page - 1) * 5
+        page_backups = self.backup_files[start_index:start_index + 5]
+
+        title = "Backup files"
+        description = f"Page {current_page}/{total_pages} · {total_backups} backup(s) available."
+        container_items = [
+            TextDisplay(f"<:floppy_disk:1517577943290188033> **{title}**"),
+            TextDisplay(description),
+            Separator(),
+        ]
+
+        if not page_backups:
+            container_items.append(Section("No backups found. Run a backup or wait for the scheduler to create one."))
+        else:
+            for index, backup_path in enumerate(page_backups, start=start_index + 1):
+                file_label = f"{index}. {backup_path.name}"
+                backup_button = Button(label="Edit", style=discord.ButtonStyle.primary, custom_id=f"backup_edit_{current_page}_{index}")
+
+                async def backup_callback(interaction: discord.Interaction, backup_file=backup_path):
+                    await self.open_backup_actions(interaction, backup_file)
+
+                backup_button.callback = backup_callback
+                container_items.append(Section(f"{file_label}\n{format_backup_entry(backup_path)}", accessory=backup_button))
+
+        self.add_item(Container(*container_items, accent_color=discord.Color.blurple()))
+
+        prev_button = Button(label="Previous", style=discord.ButtonStyle.secondary, custom_id="backup_prev")
+        next_button = Button(label="Next", style=discord.ButtonStyle.secondary, custom_id="backup_next")
+        create_button = Button(label="Create Backup", style=discord.ButtonStyle.success, custom_id="backup_create")
+        close_button = Button(label="Close", style=discord.ButtonStyle.danger, custom_id="backup_close")
+        prev_button.callback = self.open_previous_page
+        next_button.callback = self.open_next_page
+        create_button.callback = self.create_backup
+        close_button.callback = self.close_view
+        prev_button.disabled = current_page <= 1
+        next_button.disabled = current_page >= total_pages
+
+        self.add_item(discord.ui.ActionRow(prev_button, next_button, create_button, close_button))
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This backup panel is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def open_previous_page(self, interaction: discord.Interaction):
+        new_view = BackupListView(self.user_id, page=self.page - 1)
+        new_view.message = interaction.message
+        await interaction.response.edit_message(view=new_view)
+
+    async def open_next_page(self, interaction: discord.Interaction):
+        new_view = BackupListView(self.user_id, page=self.page + 1)
+        new_view.message = interaction.message
+        await interaction.response.edit_message(view=new_view)
+
+    async def create_backup(self, interaction: discord.Interaction):
+        backup_path = create_backup(BASE_DIR)
+        await interaction.response.send_message(f"<:approve:1517452125687513158> Created backup `{backup_path.name}`.", ephemeral=True)
+        if self.message is None and interaction.message is not None:
+            self.message = interaction.message
+        if self.message:
+            refreshed_view = BackupListView(self.user_id, page=self.page)
+            refreshed_view.message = self.message
+            await self.message.edit(view=refreshed_view)
+
+    async def close_view(self, interaction: discord.Interaction):
+        if interaction.message:
+            await interaction.message.delete()
+        else:
+            await interaction.response.send_message("Backup list closed.", ephemeral=True)
+
+    async def open_backup_actions(self, interaction: discord.Interaction, backup_file: Path):
+        await interaction.response.send_message(
+            f"What would you like to do with `{backup_file.name}`?",
+            view=BackupActionView(self.user_id, backup_file, self),
+            ephemeral=True,
+        )
+
+
+class BackupActionView(discord.ui.View):
+    def __init__(self, user_id: int, backup_file: Path, list_view: BackupListView):
+        super().__init__(timeout=180)
+        self.user_id = user_id
+        self.backup_file = backup_file
+        self.list_view = list_view
+        self.load_button = Button(label="Load", style=discord.ButtonStyle.success, custom_id="backup_action_load")
+        self.delete_button = Button(label="Delete", style=discord.ButtonStyle.danger, custom_id="backup_action_delete")
+        self.cancel_button = Button(label="Cancel", style=discord.ButtonStyle.secondary, custom_id="backup_action_cancel")
+        self.load_button.callback = self.load_callback
+        self.delete_button.callback = self.delete_callback
+        self.cancel_button.callback = self.cancel_callback
+        self.add_item(self.load_button)
+        self.add_item(self.delete_button)
+        self.add_item(self.cancel_button)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This selection is only for the original user.", ephemeral=True)
+            return False
+        return True
+
+    async def load_callback(self, interaction: discord.Interaction):
+        modal = BackupPasswordModal(self.user_id, self.backup_file, "load", self.list_view)
+        await interaction.response.send_modal(modal)
+
+    async def delete_callback(self, interaction: discord.Interaction):
+        modal = BackupPasswordModal(self.user_id, self.backup_file, "delete", self.list_view)
+        await interaction.response.send_modal(modal)
+
+    async def cancel_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(content="Backup action cancelled.", view=None)
+
+
+class BackupPasswordModal(Modal):
+    def __init__(self, user_id: int, backup_file: Path, action: str, list_view: BackupListView):
+        super().__init__(title=f"Confirm {action.title()} Backup")
+        self.user_id = user_id
+        self.backup_file = backup_file
+        self.action = action
+        self.list_view = list_view
+        self.password_input = TextInput(label="Owner password", style=discord.TextStyle.short, placeholder="Enter OWN_PASSWORD from .env", required=True, min_length=1)
+        self.add_item(self.password_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> This password prompt is only for the original user.", ephemeral=True)
+            return
+
+        if not OWN_PASSWORD:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> OWN_PASSWORD is not configured in .env.", ephemeral=True)
+            return
+
+        if self.password_input.value != OWN_PASSWORD:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Incorrect password.", ephemeral=True)
+            return
+
+        if self.action == "load":
+            await self.perform_load(interaction)
+        elif self.action == "delete":
+            await self.perform_delete(interaction)
+        else:
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Unknown action.", ephemeral=True)
+
+    async def perform_load(self, interaction: discord.Interaction):
+        if not self.backup_file.exists():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Backup file no longer exists.", ephemeral=True)
+            return
+
+        try:
+            backup_before_restore = create_backup(BASE_DIR)
+            with zipfile.ZipFile(self.backup_file, 'r') as zf:
+                zf.extractall(path=BASE_DIR)
+            await interaction.response.send_message(
+                f"<:approve:1517452125687513158> Loaded backup `{self.backup_file.name}` and created current backup `{backup_before_restore.name}`.",
+                ephemeral=True,
+            )
+            if self.list_view.message:
+                await self.list_view.message.edit(view=BackupListView(self.user_id, page=self.list_view.page))
+        except Exception as e:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> Failed to load backup: {e}", ephemeral=True)
+
+    async def perform_delete(self, interaction: discord.Interaction):
+        if not self.backup_file.exists():
+            await interaction.response.send_message("<:disapprove:1517452151012589662> Backup file no longer exists.", ephemeral=True)
+            return
+
+        try:
+            self.backup_file.unlink()
+            await interaction.response.send_message(
+                f"<:trash:1517497581058527404> Deleted backup `{self.backup_file.name}`.",
+                ephemeral=True,
+            )
+            if self.list_view.message:
+                await self.list_view.message.edit(view=BackupListView(self.user_id, page=self.list_view.page))
+        except Exception as e:
+            await interaction.response.send_message(f"<:disapprove:1517452151012589662> Failed to delete backup: {e}", ephemeral=True)
 
 
 start_backup_scheduler()
