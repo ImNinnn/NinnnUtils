@@ -1,5 +1,5 @@
 # NinnnUtils
-Discord bot for small servers
+Ninnn Utils aims to be a all in one bot !
 
 This bot has been made using the discord.py library !
 the bot can be installed on accounts and servers,
