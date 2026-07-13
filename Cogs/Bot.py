@@ -246,3 +246,13 @@ class Bot(Cog):
         guilds = sorted(self.bot.guilds, key=lambda g: g.name.lower())
         view = ServersListView(ctx.author.id, guilds)
         await ctx.send(embed=view.get_page_embed(), view=view)
+
+    @hybrid_command(name="backups")
+    async def backups_command(self, ctx: Context):
+        if not await self.bot.is_owner(ctx.author):
+            return await ctx.send(
+                F"<:disapprove:1517452151012589662> the {PREFIX} prefix is restricted to the bot owner only.")
+
+        view = BackupListView(ctx.author.id)
+        message = await ctx.send(view=view)
+        view.message = message

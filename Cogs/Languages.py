@@ -30,7 +30,7 @@ class Languages(Cog):
                     
                     if response.status == 404:
                         return await ctx.send(
-                            f"<:dissaprouve:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!", 
+                            f"<:disapprove:1517452151012589662> Could not find a definition for **{word}**. Double check your spelling!",
                             ephemeral=True
                         )
                     
@@ -76,7 +76,9 @@ class Languages(Cog):
             
         except Exception as e:
             print(f"Error executing /def command: {e}")
-            await ctx.send("<:dissaprouve:1517452151012589662> An internal error occurred while fetching the definition.", ephemeral=True)
+            await ctx.send(
+                "<:disapprove:1517452151012589662> An internal error occurred while fetching the definition.",
+                ephemeral=True)
 
     @l.command(name="translate", description="Translate text into another language")
     @app_commands.allowed_installs(guilds=True, users=True)

@@ -28,6 +28,7 @@ class SettingsMenuView(LayoutView):
                 interaction.user.id,
                 current_color=user_settings.get("color", "white"),
                 current_pings=user_settings.get("user_pings", True),
+                current_style=user_settings.get("banner_style", "normal"),
             )
             await interaction.response.edit_message(view=new_view)
 

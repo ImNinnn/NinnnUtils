@@ -17,3 +17,10 @@ async def safe_send(interaction: discord.Interaction, content: str, **kwargs):
             pass
     except (discord.NotFound, discord.HTTPException):
         pass
+
+def is_valid_send_mode(value: str) -> bool:
+    return str(value).strip().lower() in {"dm", "channel", "both"}
+
+
+def normalize_send_mode(value: str) -> str:
+    return str(value).strip().lower() if is_valid_send_mode(value) else "dm"

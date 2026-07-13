@@ -5,7 +5,8 @@ from Shared.Boards import get_guild_board_entries, load_board_data, save_board_d
 from Shared.Counters import get_guild_counter_entries
 from Shared.Guilds import format_channel_reference
 from Shared.Leveling import get_level_channel_id, set_level_channel
-from Shared.Locks import save_lock_config, get_guild_admin_log_channel_ids
+from Shared.Locks import save_lock_config
+from Shared.Moderation import get_admin_log_channel_mentions, get_guild_admin_log_channel_ids
 from main import admin_log_channels, locked_channels
 from . import *
 from .YesNo import YesNoView
@@ -42,17 +43,29 @@ class ChannelSettingsView(LayoutView):
         board_entries = get_guild_board_entries(self.guild_id)
         counter_entries = get_guild_counter_entries(guild) if guild else []
         locked_entries = get_locked_channel_mentions(guild) if guild else []
+        honeypot_channel = format_channel_reference(guild, guild_config.get("honeypot_channel_id")) if guild else "None"
+        honeypot_sanction = guild_config.get("honeypot_sanction") or {}
+        honeypot_action = str(honeypot_sanction.get("action", "timeout")).lower()
+        honeypot_duration = str(honeypot_sanction.get("duration", "") or "")
+        if honeypot_action == "timeout":
+            honeypot_summary = f"Timeout ({honeypot_duration or '1d'})"
+        else:
+            honeypot_summary = honeypot_action.title() if honeypot_action in {"kick", "ban"} else "None"
+        honeypot_value = f"{honeypot_channel}\nSanction: {honeypot_summary}" if guild_config.get("honeypot_channel_id") else f"{honeypot_channel}\nSanction: None"
+
 
         if self.page == 1:
             self.welcome_button = Button(label="Remove" if guild_config.get("welcome_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_welcome_toggle")
             self.goodbye_button = Button(label="Remove" if guild_config.get("goodbye_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_goodbye_toggle")
             self.level_button = Button(label="Remove" if level_id else "Set", style=discord.ButtonStyle.primary, custom_id="channel_level_toggle")
             self.admin_button = Button(label=admin_label, style=discord.ButtonStyle.primary, custom_id="channel_admin_toggle")
+            self.honeypot_button = Button(label="Remove" if guild_config.get("honeypot_channel_id") else "Set", style=discord.ButtonStyle.primary, custom_id="channel_honeypot_toggle")
 
             self.welcome_button.callback = self.handle_welcome_toggle
             self.goodbye_button.callback = self.handle_goodbye_toggle
             self.level_button.callback = self.handle_level_toggle
             self.admin_button.callback = self.handle_admin_toggle
+            self.honeypot_button.callback = self.handle_honeypot_toggle
 
             page_button = Button(label="Page 2", style=discord.ButtonStyle.secondary, custom_id="channel_settings_next")
             page_button.callback = self.open_page_two
@@ -83,6 +96,8 @@ class ChannelSettingsView(LayoutView):
                 Section(f"<:minus:1518348754111959150> Goodbye Channel\n{goodbye_channel}", accessory=self.goodbye_button),
                 Section(f"<:chalice:1517579767573123092> Level-up Announce Channel\n{level_channel}", accessory=self.level_button),
                 Section(f"<:unlocked:1517574880034558102> Admin Log Channel\n{admin_value}", accessory=self.admin_button),
+                Section(f"<:honey:1524116282075512842> Honeypot Channel\n{honeypot_value}",
+                        accessory=self.honeypot_button),
             ]
         else:
             board_text = "\n".join(board_entries) if board_entries else "None"
@@ -132,7 +147,7 @@ class ChannelSettingsView(LayoutView):
             pass
 
     async def handle_back(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(view=SettingsMenuView(interaction.user.id, interaction.user.display_name, get_user_color_value(str(interaction.user.id))))
+        await interaction.response.edit_message(view=GuildSettingsMenuView(interaction.user.id, self.guild_id))
 
     async def handle_close(self, interaction: discord.Interaction):
         for item in self.children:
@@ -414,6 +429,57 @@ class ChannelSettingsView(LayoutView):
             view=ChannelEditChoiceView(self.user_id, "Locked Channels", self.open_locked_add, self.open_locked_remove, interaction.message),
             ephemeral=True,
         )
+
+    async def handle_honeypot_toggle(self, interaction: discord.Interaction):
+        guild = interaction.guild
+        if not guild:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> This action must be used in a server.", ephemeral=True)
+        guild_config, _ = get_guild_config(self.guild_id)
+        if guild_config.get("honeypot_channel_id"):
+            await interaction.response.send_message("Please confirm removal of the honeypot channel.", view=ConfirmRemoveView(self.user_id, self.confirm_remove_honeypot, interaction.message), ephemeral=True)
+            return
+        await interaction.response.send_message(
+            "Select the honeypot channel:",
+            view=ChannelSelectorView(self.user_id, guild, "Select honeypot channel", self.open_honeypot_sanction, interaction.message),
+            ephemeral=True,
+        )
+
+    async def open_honeypot_sanction(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, settings_message: discord.Message):
+        resolved_channel = channel
+        if interaction.guild and getattr(channel, "id", None):
+            resolved_channel = interaction.guild.get_channel(channel.id) or await interaction.guild.fetch_channel(channel.id)
+        if not resolved_channel or getattr(resolved_channel, "type", None) != discord.ChannelType.text:
+            return await interaction.response.send_message("<:disapprove:1517452151012589662> Please select a text channel for the honeypot.", ephemeral=True)
+        await interaction.response.send_modal(HoneypotSanctionModal(self.set_honeypot_channel, resolved_channel, settings_message))
+
+    async def set_honeypot_channel(self, interaction: discord.Interaction, channel: discord.abc.GuildChannel, action: str, duration_seconds: int, duration_text: str, settings_message: discord.Message):
+        resolved_channel = channel
+        if interaction.guild and getattr(channel, "id", None):
+            resolved_channel = interaction.guild.get_channel(channel.id) or await interaction.guild.fetch_channel(channel.id)
+
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["honeypot_channel_id"] = getattr(resolved_channel, "id", channel.id)
+        guild_config["honeypot_sanction"] = {
+            "action": action,
+            "duration_seconds": duration_seconds,
+            "duration": duration_text,
+        }
+        save_guild_data(data)
+        try:
+            if resolved_channel and hasattr(resolved_channel, "send"):
+                await resolved_channel.send(f"<:honey:1524116282075512842> This channel is a honeypot. Please do not send messages here. Any message sent here will trigger a sanction.")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+        await safe_send(interaction, f"<:approve:1517452125687513158> Honeypot channel set to {getattr(resolved_channel, 'mention', str(channel.id))}.", ephemeral=True)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), settings_message)
+
+    async def confirm_remove_honeypot(self, interaction: discord.Interaction, original_message: discord.Message):
+        guild_config, data = get_guild_config(self.guild_id)
+        guild_config["honeypot_channel_id"] = None
+        guild_config["honeypot_sanction"] = {}
+        save_guild_data(data)
+        await self.refresh_settings_message(interaction, ChannelSettingsView(self.user_id, self.guild_id, self.color, page=1), original_message)
+        await interaction.followup.send("<:trash:1517497581058527404> Honeypot channel has been removed.", ephemeral=True)
 
     async def open_locked_add(self, interaction: discord.Interaction, settings_message: discord.Message):
         guild = interaction.guild

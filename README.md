@@ -43,4 +43,4 @@ Oooopen .env up for editing, we'll configure the bot here
 | SHARD_COUNT           | Sharding is required when your bot reaches 1500 servers or more, this specifies how many shards the bot will have | 10                              |
 | DISCORD_RPC_CLIENT_ID | The app ID that will be used for __your__ RPC                                                                     | 1500798502735708281             |
 | PREFIX                | Prefix for owner commands (Will also be for normal commands, trust me ;)                                          | n!                              |
-
+| OWN_PASSWORD          | Passwords for owner commands                                                                                      | 1mC00k3d!!1                     |

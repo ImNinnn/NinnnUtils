@@ -40,7 +40,7 @@ class Guild(Cog):
         embed.add_field(name="<:multi:1518348755261460661> Roles", value=f"{len(guild.roles)}", inline=True)
         embed.add_field(name="\n<:graph:1517584522877866065> Members", value=" ", inline=False)
         embed.add_field(name="<:approuve:1517452125687513158> Real Accounts", value=str(human_count), inline=True)
-        embed.add_field(name="<:dissaprouve:1517452151012589662> Bots", value=str(bot_count), inline=True)
+        embed.add_field(name="<:disapprove:1517452151012589662> Bots", value=str(bot_count), inline=True)
         embed.add_field(name="<:warning:1517452174991556758> Total", value=str(total_count), inline=True)
         if guild.icon:
             embed.set_thumbnail(url=guild.icon.url)
@@ -128,6 +128,7 @@ class Guild(Cog):
                 except Exception:
                     continue
         locked_channels = "\n".join(locked_channels_list) if locked_channels_list else "None"
+        honeypot_channel = fmt_channel(guild_config.get("honeypot_channel_id"))
 
         embed = discord.Embed(title=f"<:drawer:1517497564189036574> Configured Channels for {guild.name}",
                               color=discord.Color.blurple())
@@ -139,6 +140,8 @@ class Guild(Cog):
         embed.add_field(name="<:list:1517497572770451567> Counter Channels", value=counter_channels, inline=False)
         embed.add_field(name="<:unlocked:1517574880034558102> Admin Log Channel", value=admin_log_channel, inline=False)
         embed.add_field(name="<:locked:1517574877257924809> Locked Channels", value=locked_channels, inline=False)
+        embed.add_field(name="<:honey:1524116282075512842> Honeypot Channel", value=honeypot_channel, inline=False)
+
         embed.set_footer(text=f"Run /settings and go to channel settings to change these settings.")
 
         await ctx.send(embed=embed)

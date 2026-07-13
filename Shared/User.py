@@ -4,7 +4,7 @@ from LowerLeveled.jsonutils import load_json_file, save_json_file
 from Shared.DataManager import DataManager
 from Shared.Guilds import get_guild_data
 from Shared.Leveling import load_levels
-from main import USER_FILE
+from main import USER_FILE, MAX_USER_REMINDERS, MAX_USER_NOTES, MAX_USER_LIST_ITEMS
 
 
 def load_user_settings():
@@ -111,3 +111,65 @@ def get_user_color_value(user_id: str) -> discord.Color:
         "brown": discord.Color.dark_orange(),
     }
     return color_map.get(color_name, discord.Color.blurple())
+
+def can_add_user_reminder(user_id: str) -> bool:
+    return len(get_user_reminders(user_id)) < MAX_USER_REMINDERS
+
+
+def get_user_banner_style(user_id: str) -> str:
+    settings = load_user_settings()
+    return get_user_settings_entry(settings, user_id).get("banner_style", "normal")
+
+
+def get_user_notes(user_id: str) -> list[str]:
+    settings = load_user_settings()
+    notes = get_user_settings_entry(settings, user_id).get("notes")
+    if isinstance(notes, list):
+        return [str(note) for note in notes[:MAX_USER_NOTES]]
+    return []
+
+
+def save_user_notes(user_id: str, notes: list[str]) -> None:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    user_settings["notes"] = [str(note) for note in notes[:MAX_USER_NOTES]]
+    save_user_settings(settings)
+
+
+def get_user_reminders(user_id: str) -> list[dict]:
+    settings = load_user_settings()
+    reminders = get_user_settings_entry(settings, user_id).get("reminders")
+    if isinstance(reminders, list):
+        valid_reminders = []
+        for reminder in reminders:
+            if isinstance(reminder, dict) and "name" in reminder and "when" in reminder:
+                valid_reminders.append(reminder)
+        return valid_reminders
+    return []
+
+
+def save_user_reminders(user_id: str, reminders: list[dict]) -> None:
+    settings = load_user_settings()
+    get_user_settings_entry(settings, user_id)["reminders"] = reminders
+    save_user_settings(settings)
+
+
+def get_user_lists(user_id: str) -> list[list[dict]]:
+    settings = load_user_settings()
+    lists = get_user_settings_entry(settings, user_id).get("lists")
+    if not isinstance(lists, list) or len(lists) < 1:
+        return [[]]
+    first_list = lists[0]
+    if isinstance(first_list, list):
+        return [[item for item in first_list if isinstance(item, dict)]]
+    return [[]]
+
+
+def save_user_lists(user_id: str, lists: list[list[dict]]) -> None:
+    settings = load_user_settings()
+    user_settings = get_user_settings_entry(settings, user_id)
+    normalized = []
+    first_list = lists[0] if lists and isinstance(lists[0], list) else []
+    normalized.append(first_list[:MAX_USER_LIST_ITEMS])
+    user_settings["lists"] = normalized
+    save_user_settings(settings)

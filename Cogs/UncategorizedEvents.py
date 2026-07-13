@@ -1,8 +1,11 @@
 import random
+import time
 
 from discord.ext.commands import Cog
 import discord, traceback
 
+from Cogs.Lists import Lists
+from Shared.AFK import get_afk_status_key, clear_afk_status
 from Shared.Cache import clean_cache
 from Shared.Counters import handle_counter_message
 from Shared.Errors import *
@@ -11,7 +14,8 @@ from discord import app_commands
 from Shared.Fun import load_fun_data
 from Shared.Leveling import add_xp
 from Shared.Moderation import apply_honeypot_sanction
-from main import NinnnUtils, locked_channels, admin_log_channels, server_pauses, all_paused_guilds, message_cache
+from main import NinnnUtils, locked_channels, admin_log_channels, server_pauses, all_paused_guilds, message_cache, \
+    afk_status, AFK_MESSAGE_WINDOW_SECONDS, AFK_MESSAGE_LIMIT
 from Giveaways import Giveaways
 from RPC import RPC
 from Blacklist import Blacklist
@@ -29,6 +33,7 @@ class UnEvents(Cog):
         cog: RPC = self.bot.get_cog("RPC")
         blk: Blacklist = self.bot.get_cog("Blacklist")
         gws: Giveaways = self.bot.get_cog("Giveaways")
+        rmd: Lists = self.bot.get_cog("Lists")
         shard_info = (
             f"{len(self.bot.shards)} shard(s), IDs {list(self.bot.shards.keys())}"
             if self.bot.shards
@@ -47,6 +52,8 @@ class UnEvents(Cog):
             gws.giveaway_loop.start()
         if not gws.giveaway_refresh_loop.is_running():
             gws.giveaway_refresh_loop.start()
+        if not rmd.reminder_loop.is_running():
+            rmd.reminder_loop.start()
         self.bot.loop.create_task(blk.blacklist_startup_cleanup())
 
     @Cog.listener()
@@ -105,6 +112,33 @@ class UnEvents(Cog):
     async def on_message(self, message):
         if message.author.bot:
             return
+
+        if message.guild and message.mentions:
+            for mention in message.mentions:
+                if mention.id == message.author.id or mention.bot:
+                    continue
+
+                afk_key = get_afk_status_key(message.guild.id, mention.id)
+                afk_entry = afk_status.get(afk_key)
+                if afk_entry:
+                    try:
+                        await message.reply(
+                            f"<:warning:1517452174991556758> **{mention.display_name}** is AFK right now. Reason: {get_afk_reason(afk_entry)}")
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                    break
+
+        if message.guild:
+            afk_key = get_afk_status_key(message.guild.id, message.author.id)
+            afk_entry = afk_status.get(afk_key)
+            if afk_entry:
+                now = time.time()
+                timestamps = [timestamp for timestamp in afk_entry.get("message_times", []) if
+                              now - timestamp <= AFK_MESSAGE_WINDOW_SECONDS]
+                timestamps.append(now)
+                afk_entry["message_times"] = timestamps
+                if len(timestamps) >= AFK_MESSAGE_LIMIT:
+                    await clear_afk_status(message.author, channel=message.channel)
 
         if message.guild:
             if await apply_honeypot_sanction(message.author, message.guild, message.channel, message.content):

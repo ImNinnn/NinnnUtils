@@ -128,7 +128,7 @@ async def sync_guild_word_block_rule(bot, guild_id: str) -> None:
     except Exception:
         pass
 
-async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: str, total_warnings: int | None = None, automod_triggered: bool = False) -> None:
+async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: str, total_warnings: int | None = None, automod_triggered: bool = False, sanction: str | None = None) -> None:
     if member.bot:
         return
 
@@ -139,43 +139,52 @@ async def send_warning_dm(member: discord.Member, guild: discord.Guild, reason: 
     if total_warnings is not None:
         description += f"\n**Total warnings:** {total_warnings}"
 
-    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    embed = discord.Embed(title=title, description=description, color=discord.Color.yellow())
+    if sanction:
+        embed.add_field(name="Sanction", value=sanction, inline=True)
+
     try:
         await member.send(embed=embed)
     except (discord.Forbidden, discord.HTTPException):
         pass
 
-async def apply_warning_sanctions(member: discord.Member, guild: discord.Guild, total_warnings: int) -> None:
+
+async def apply_warning_sanctions(member: discord.Member, guild: discord.Guild, total_warnings: int) -> str | None:
     automod, data = get_guild_automod_config(str(guild.id))
     sanction_state = automod.setdefault("warning_sanction_state", {})
     member_key = str(member.id)
     last_applied = int(sanction_state.get(member_key, {}).get("last_applied_warns", 0))
     if total_warnings <= last_applied:
-        return
+        return None
 
     applicable = [
         rule for rule in automod.get("warning_sanctions", [])
         if isinstance(rule, dict) and int(rule.get("warns", 0)) <= total_warnings
     ]
     if not applicable:
-        return
+        return None
 
     rule = max(applicable, key=lambda rule: int(rule.get("warns", 0)))
     threshold = int(rule.get("warns", 0))
     action = str(rule.get("action", "timeout")).lower()
+    sanction_text = None
     try:
         if action == "timeout":
             duration_seconds = max(1, int(rule.get("duration_seconds", 86400)))
             timed_out_until = datetime.now(timezone.utc) + timedelta(seconds=duration_seconds)
             await member.edit(timed_out_until=timed_out_until, reason=f"Reached {threshold} warnings")
+            sanction_text = f"Timeout for {format_duration(duration_seconds)}"
         elif action == "kick":
             await member.kick(reason=f"Reached {threshold} warnings")
+            sanction_text = "Kick"
         elif action == "ban":
             await member.ban(reason=f"Reached {threshold} warnings")
+            sanction_text = "Ban"
     except (discord.Forbidden, discord.HTTPException):
         pass
     sanction_state[member_key] = {"last_applied_warns": total_warnings}
     save_guild_data(data)
+    return sanction_text
 
 async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: discord.Guild, channel: discord.abc.GuildChannel, message_content: str | None = None) -> bool:
     if member.bot or not guild or not isinstance(member, discord.Member):
@@ -197,13 +206,23 @@ async def apply_honeypot_sanction(member: discord.Member | discord.User, guild: 
     if len(content_preview) > 500:
         content_preview = content_preview[:497] + "..."
 
+    if action == "timeout":
+        duration_seconds = max(1, int(sanction.get("duration_seconds", 86400)))
+        sanction_text = f"Timeout for {format_duration(duration_seconds)}"
+    elif action == "kick":
+        sanction_text = "Kick"
+    else:
+        sanction_text = "Ban"
+
+    await send_honeypot_dm(member, guild, channel, sanction_text, content_preview)
+
     for log_id in get_guild_admin_log_channel_ids(guild):
         log_channel = guild.get_channel(log_id)
         if log_channel is None:
             continue
         try:
             await log_channel.send(
-                f"**[HONEYPOT]** `{member.display_name}`: {content_preview}\n-# <:honey:1524116282075512842> **Honeypot triggered** by {member.mention} | Action: {action.title()}"
+                f"**[HONEYPOT]** `{member.display_name}`: {content_preview}\n-# <:honey:1524116282075512842> **Honeypot triggered** | Action: {action.title()}"
             )
         except (discord.Forbidden, discord.HTTPException):
             pass
@@ -229,3 +248,18 @@ def get_guild_admin_log_channel_ids(guild: discord.Guild) -> list[int]:
 def get_admin_log_channel_mentions(guild: discord.Guild) -> list[str]:
     """Get mentions for admin log channels"""
     return _get_channel_mentions(guild, admin_log_channels)
+
+async def send_honeypot_dm(member: discord.Member, guild: discord.Guild, channel: discord.abc.GuildChannel, sanction: str, message_preview: str) -> None:
+    if member.bot:
+        return
+
+    title = "<:honey:1524116282075512842> Sent a message in a honeypot channel"
+    description = f"**Server:** {guild.name}\n**Channel:** {getattr(channel, 'mention', str(channel.id))}\n**Action:** {sanction}"
+
+    embed = discord.Embed(title=title, description=description, color=discord.Color.gold())
+    embed.add_field(name="Message preview", value=message_preview, inline=False)
+
+    try:
+        await member.send(embed=embed)
+    except (discord.Forbidden, discord.HTTPException):
+        pass

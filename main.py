@@ -24,6 +24,7 @@ BLACKLISTED_GUILDS = [int(sid.strip()) for sid in raw_blacklist.split(',') if si
 ACTIVITY_TEXT = os.getenv('ACTIVITY')
 SHARD_COUNT = int(os.getenv('SHARD_COUNT', '0'))
 PREFIX = os.getenv('PREFIX')
+OWN_PASSWORD = os.getenv('OWN_PASSWORD')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_FILE = os.path.join(BASE_DIR, 'economy.json')
@@ -119,6 +120,15 @@ local_rpc_queue = queue.Queue(maxsize=1)
 # -------------------------------------------------------------------------------------------------------------
 
 locked_channels, admin_log_channels = load_lock_config()
+MAX_USER_NOTES = 3
+MAX_USER_REMINDERS = 7
+MAX_USER_LIST_ITEMS = 30
+CHECKLIST_PAGE_SIZE = 10
+PENDING_POSTPONE_REMINDERS: dict[str, dict] = {}
+AFK_PREFIX = "[AFK]"
+AFK_MESSAGE_WINDOW_SECONDS = 60
+AFK_MESSAGE_LIMIT = 3
+afk_status: dict[str, dict[str, object]] = {}
 
 
 # -------------------------------------------------------------------------------------------------------------

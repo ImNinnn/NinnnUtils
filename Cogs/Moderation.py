@@ -77,9 +77,15 @@ class Moderation(Cog):
                 member = None
 
         if member is not None and not member.bot:
-            await send_warning_dm(member, guild, f"Discord AutoMod blocked a message via rule {action.rule_id}",
-                                  total_warnings=len(warnings), automod_triggered=True)
-            await apply_warning_sanctions(member, guild, len(warnings))
+            sanction_text = await apply_warning_sanctions(member, guild, len(warnings))
+            await send_warning_dm(
+                member,
+                guild,
+                f"Discord AutoMod blocked a message via rule {action.rule_id}",
+                total_warnings=len(warnings),
+                automod_triggered=True,
+                sanction=sanction_text
+            )
 
         if member is None:
             return

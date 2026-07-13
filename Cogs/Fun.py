@@ -1,7 +1,9 @@
 import asyncio
+import io
 from datetime import datetime
 
 import discord
+from PIL import Image, ImageSequence
 from discord.ext.commands import Cog, Context, hybrid_command, hybrid_group
 from discord import app_commands
 import random
@@ -251,3 +253,45 @@ class Fun(Cog):
         view = WorkGameView(job_type, guild_id, ctx.author.id, amount, difficulty)
         msg = await ctx.send(embed=view.embed, view=view)
         view.message = msg
+
+    @hybrid_command()
+    @app_commands.allowed_installs(guilds=True, users=True)
+    @app_commands.allowed_contexts(guilds=True, dms=True, private_channels=True)
+    @app_commands.describe(image="The image to convert to GIF")
+    async def gif(self, ctx: Context, image: discord.Attachment):
+        """Convert an image attachment into a GIF file"""
+        await ctx.defer()
+
+        if not image:
+            await ctx.send("<:disapprove:1517452151012589662> Please attach an image to convert.",
+                                            ephemeral=True)
+            return
+
+        try:
+            image_bytes = await image.read()
+            with Image.open(io.BytesIO(image_bytes)) as img:
+                if getattr(img, "is_animated", False):
+                    frames = [frame.convert("RGBA") for frame in ImageSequence.Iterator(img)]
+                    buffer = io.BytesIO()
+                    frames[0].save(
+                        buffer,
+                        format="GIF",
+                        save_all=True,
+                        append_images=frames[1:],
+                        loop=0,
+                        duration=img.info.get("duration", 100),
+                        disposal=2,
+                    )
+                else:
+                    converted = img.convert("RGBA")
+                    buffer = io.BytesIO()
+                    converted.save(buffer, format="GIF", optimize=True)
+
+                buffer.seek(0)
+                await ctx.send(file=discord.File(buffer, filename="converted.gif"))
+
+        except Exception as e:
+            await ctx.send(
+                f"<:disapprove:1517452151012589662> Failed to convert the image to GIF. Please make sure the file is a valid image. Error: {e}",
+                ephemeral=True
+            )

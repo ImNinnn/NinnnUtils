@@ -327,7 +327,7 @@ class Admin(Cog):
         if not target_member.bot:
             try:
                 dm_embed = discord.Embed(
-                    title="<:dissaprouve:1517452151012589662> You have been banned",
+                    title="<:disapprove:1517452151012589662> You have been banned",
                     description=f"**Server:** {ctx.guild.name}\n**Reason:** {reason}",
                     color=discord.Color.red()
                 )
@@ -515,18 +515,28 @@ class Admin(Cog):
             moderator_name=str(ctx.author),
         )
 
-        if not member.bot:
-            await send_warning_dm(member, ctx.guild, reason, total_warnings=len(warnings))
+        total = len(warnings)
+        sanction_text = await apply_warning_sanctions(member, ctx.guild, total)
+
+        await send_warning_dm(
+            member,
+            interaction.guild,
+            reason,
+            total_warnings=total,
+            sanction=sanction_text
+        )
 
         total = len(warnings)
         await apply_warning_sanctions(member, ctx.guild, total)
         confirm_embed = discord.Embed(
             title="<:warning:1517452174991556758> Warning added",
             description=f"**{format_user_reference(member)}** has been warned.",
-            color=discord.Color.orange()
+            color=discord.Color.yellow()
         )
         confirm_embed.add_field(name="Reason", value=reason, inline=False)
-        confirm_embed.add_field(name="Total warnings", value=str(total), inline=True)
+        confirm_embed.add_field(name="Total warnings", value=str(total), inline=False)
+        if sanction_text:
+            confirm_embed.add_field(name="Sanction", value=sanction_text, inline=True)
         await ctx.send(embed=confirm_embed)
         return
 
@@ -962,7 +972,7 @@ class Admin(Cog):
                             value=f"{processed}/{len(affected_members)} ({progress_percent:.1f}%)", inline=True)
             embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
             embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
-            embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+            embed.add_field(name="<:disapprove:1517452151012589662> Failed", value=str(failed), inline=True)
             return embed
 
         async def update_progress_message(message: discord.Message):
@@ -1018,7 +1028,7 @@ class Admin(Cog):
         embed.add_field(name="<:approuve:1517452125687513158> Updated", value=str(updated), inline=True)
         embed.add_field(name="<:warning:1517452174991556758> Skipped", value=str(skipped), inline=True)
         if failed:
-            embed.add_field(name="<:dissaprouve:1517452151012589662> Failed", value=str(failed), inline=True)
+            embed.add_field(name="<:disapprove:1517452151012589662> Failed", value=str(failed), inline=True)
 
         try:
             await progress_message.edit(content=f"<:approve:1517452125687513158> Finished updating roles.", embed=embed)

@@ -4,12 +4,15 @@ import os
 import discord
 from PIL import Image, ImageDraw, ImageFont
 
-from Shared.User import format_banner_username, get_banner_name
+from Shared.User import format_banner_username, get_banner_name, get_user_banner_style
 
 
 async def create_welcome_card(member):
     base_path = os.path.dirname(__file__)
-    bg_path = os.path.join(base_path, "welcome_bg.png")
+    style = get_user_banner_style(str(member.id))
+    alt_bg = os.path.join(base_path, "welcome_bg_alt.png")
+    default_bg = os.path.join(base_path, "welcome_bg.png")
+    bg_path = alt_bg if style == "alt" and os.path.exists(alt_bg) else default_bg
     font_path = os.path.join(base_path, "Minecraft.ttf")
 
     if not os.path.exists(bg_path):

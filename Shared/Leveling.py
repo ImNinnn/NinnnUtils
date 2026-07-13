@@ -11,7 +11,7 @@ from Shared.Errors import add_bot_error_entry
 from Shared.Guilds import get_guild_config
 from Shared.Inventory import inventory_add
 from Shared.User import get_user_color, get_user_has_leveled_up_before, set_user_has_leveled_up_before, get_user_data, \
-    format_user_reference, format_banner_username, get_banner_name
+    format_user_reference, format_banner_username, get_banner_name, get_user_banner_style
 from main import LEVEL_FILE
 
 
@@ -154,7 +154,10 @@ async def add_xp(bot, member: discord.Member, guild: discord.Guild, xp_to_add: i
 
 async def create_levelup_card(member: discord.Member, level: int):
     base_path = os.path.dirname(__file__)
-    bg_path = os.path.join(base_path, "levelup_bg.png")
+    style = get_user_banner_style(str(member.id))
+    alt_bg = os.path.join(base_path, "levelup_bg_alt.png")
+    default_bg = os.path.join(base_path, "levelup_bg.png")
+    bg_path = alt_bg if style == "alt" and os.path.exists(alt_bg) else default_bg
     font_path = os.path.join(base_path, "Minecraft.ttf")
 
     if not os.path.exists(bg_path):
