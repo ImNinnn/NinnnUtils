@@ -2,19 +2,17 @@
 Ninnn Utils aims to be a all in one bot !
 
 This bot has been made using the discord.py library !
-the bot can be installed on accounts and servers,
-this bot adds:
-- basic fun and useful utility commands
-- commands for server admins
-- An economy and Leveling system
-- Minigames (Economy minigames, Counter)
-- Welcome and goodbye messages with banners
+the bot can be installed on accounts and servers.
+Key features:
+- Economy system
+- Leveling system
+- Auto moderation
+- Welcome / Goodbye messages
+- Board channels
+- And more utilities !
 
-Install Link https://discord.com/oauth2/authorize?client_id=1500798502735708281
+Support Server https://discord.gg/FSBPvc9zqY
 
-**Support Server https://discord.gg/FSBPvc9zqY**
+**Website : https://imninnn.github.io/NinnnUtils.Website/**
 
-ToS and Privacy policy https://imninnn.github.io
-
-To run this bot yourself, you will need to install the python libraries, any font for the banners and ffmpeg.exe for the youtube voice feature
-to get the libraries, run this pip install in the same folder as requirements.txt "**pip install -r requirements.txt**"
+Tos and Privacy policy : https://imninnn.github.io/NinnnUtils.Website/#legal
