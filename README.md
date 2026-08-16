@@ -15,4 +15,4 @@ Support Server https://discord.gg/FSBPvc9zqY
 
 **Website : https://imninnn.qd.je/ninnnutils/**
 
-Tos and Privacy policy : https://imninnn.github.io/NinnnUtils.Website/#legal
+Tos and Privacy policy : https://imninnn.qd.je/ninnnutils/#legal
