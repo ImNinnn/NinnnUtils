@@ -13,6 +13,6 @@ Key features:
 
 Support Server https://discord.gg/FSBPvc9zqY
 
-**Website : https://imninnn.qd.je**
+**Website : https://imninnn.qd.je/ninnnutils/**
 
 Tos and Privacy policy : https://imninnn.github.io/NinnnUtils.Website/#legal
