@@ -1,7 +1,9 @@
-yt-dlp
 discord.py
+yt-dlp
 python-dotenv
-pillow
+Pillow
 deep-translator
-pypresence
 aiohttp
+PyNaCl
+davey
+psutil
