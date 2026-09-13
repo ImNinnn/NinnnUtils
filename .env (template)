@@ -5,3 +5,4 @@ SERVER_BLACKLIST=         # makes the bot leave unwanted servers
 SHARD_COUNT=              # to set how many shards the bot has
 DISCORD_RPC_CLIENT_ID=    # application ID
 PREFIX=                   # prefix for owner commands
+COG_NAMES=economy,fun,games,legacy,loop,media,misc,moderation,music,settings_notes_lists_reminders,utils,levels # changes if you add or remove a cog
