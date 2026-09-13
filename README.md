@@ -16,3 +16,9 @@ Support Server https://discord.gg/FSBPvc9zqY
 **Website : https://imninnn.qd.je/ninnnutils/**
 
 Tos and Privacy policy : https://imninnn.qd.je/ninnnutils/#legal
+
+***
+
+VERSION S - (split), this branch contains the "splitted" code.
+
+if you want to see the original code, go to the main branch
