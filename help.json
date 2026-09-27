@@ -1,0 +1,390 @@
+{
+  "mini_tutorial": "New ? check you the /settings command to set up your personal and guild preferences. \nTo navigate the menu, use the buttons below, or search a command.",
+  "commands": {
+    "/help": {
+      "description": "Shows this menu",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/ping": {
+      "description": "See the bot's latency",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/stats": {
+      "description": "See the bot's statistics",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/quickstats": {
+      "description": "See a quick overview of the bot's statistics",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/avatar": {
+      "description": "View your or someone else's profile picture",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/banner": {
+      "description": "View your or someone else's banner (including the bot's banners)",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/emoji": {
+      "description": "Get the emoji's image and information from a server",
+      "environement": "User sided",
+      "category": "Basic"
+    },
+    "/daily": {
+      "description": "Claim your daily reward",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/balance": {
+      "description": "Check your balance or someone else's",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/shop": {
+      "description": "Browse the shop for available items",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/buy": {
+      "description": "Buy an item from the shop (bypass shop ui)",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/inventory": {
+      "description": "View your or someone else's inventory",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/quests": {
+      "description": "Check your available quests and their progress",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/love": {
+      "description": "See how compatible 2 things are",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/rate-cool": {
+      "description": "Rate how cool something is",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/rate-gay": {
+      "description": "Rate how gay something is",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/8ball": {
+      "description": "Get a prediction for your question",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/random": {
+      "description": "Get a random number",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/roll": {
+      "description": "Roll a die",
+      "environement": "User sided",
+      "category": "Fun"
+    },
+    "/serverinfo": {
+      "description": "View information about the server",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/channelinfo": {
+      "description": "View information about a channel",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/deleted": {
+      "description": "View deleted messages in a channel",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/edited": {
+      "description": "View edited messages in a channel",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/where-ping": {
+      "description": "See where you got pinged in the server",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/errors": {
+      "description": "See the bot's errors in the server",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/afk": {
+      "description": "Set your AFK status and reason in the server",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/say": {
+      "description": "Make the bot say something",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/translate": {
+      "description": "Translate text from one language to another",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/definition": {
+      "description": "Get the definition of a word",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/encode-decode": {
+      "description": "Encode or decode text",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/gif": {
+      "description": "Convert an image to a GIF",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/song": {
+      "description": "Play a song in a voice channel",
+      "environement": "Server sided",
+      "category": "Fun"
+    },
+    "/voice-leave": {
+      "description": "Make the bot leave the voice channel and clear the queue",
+      "environement": "Server sided",
+      "category": "Fun"
+    },
+    "/economy-leaderboard": {
+      "description": "Show the economy leaderboard for the server",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/slot-classic": {
+      "description": "Play the slot machine game",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/coinflip-classic": {
+      "description": "Play a coin flip game",
+      "environement": "User sided",
+      "category": "Game"
+    },
+    "/counter-number-set": {
+      "description": "Set the number for the counter in the channel",
+      "environement": "Server sided",
+      "category": "Fun"
+    },
+    "/warns_adm": {
+      "description": "View warnings for a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/warn_adm": {
+      "description": "Warn a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/timeout_adm": {
+      "description": "Timeout a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/ban_adm": {
+      "description": "Ban a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/kick_adm": {
+      "description": "Kick a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/role_adm": {
+      "description": "Give a role to a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/temp-role_adm": {
+      "description": "Give a temporary role to a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/role-for_adm": {
+      "description": "Give a role to multiple users",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/purge_adm": {
+      "description": "Delete a specified number of messages",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/purge-nuke_adm": {
+      "description": "Rebuild the channel from the start",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/rename_adm": {
+      "description": "Rename a user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/voice-move_adm": {
+      "description": "Move everyone in a voice channel to another voice channel",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/slowmode_adm": {
+      "description": "Set the slow mode for a channel",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/embed": {
+      "description": "Create a fully-loaded customized embed message using a styling menu",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/giveaway_adm": {
+      "description": "Create or cancel a giveaway",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/forget": {
+      "description": "Clear your messages from the bot's memory",
+      "environement": "User sided",
+      "category": "Information"
+    },
+    "/forget_adm": {
+      "description": "Clear edited and deleted history of a chosen user",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/inventory-edit": {
+      "description": "Edit a user's inventory",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/balance-edit": {
+      "description": "Set a user's balance",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/pay": {
+      "description": "Pay another user from your balance",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/slot_game": {
+      "description": "Play the economy slot machine and wager money",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/coinflip_game": {
+      "description": "Play coinflip and wager money",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/minesweeper_game": {
+      "description": "Play minesweeper and wager money",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/towers_game": {
+      "description": "Play tower gamble and wager money",
+      "environement": "Server sided",
+      "category": "Game"
+    },
+    "/work_game": {
+      "description": "Work to earn money (get 1 of 3 random jobs, 2 hour cooldown)",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/craft": {
+      "description": "Craft an item",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/use": {
+      "description": "Use an item from your inventory",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/sell": {
+      "description": "Sell a specific amount of an item from your inventory",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/trash": {
+      "description": "Delete an item from your inventory",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/give": {
+      "description": "Give an item from your inventory to another user",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/trade": {
+      "description": "Start a trade with another user",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/values_info": {
+      "description": "Show all items that can be sold and their prices",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/recipes_info": {
+      "description": "Show all available crafting recipes",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/uses_info": {
+      "description": "Show what items do when used",
+      "environement": "Server sided",
+      "category": "Economy"
+    },
+    "/level": {
+      "description": "View your current server tier standing level rank card",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/level-leaderboard": {
+      "description": "Display the top 10 highest-level users in this guild",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/level-edit": {
+      "description": "Manually adjust or set a target user's level and XP indexes",
+      "environement": "Server sided",
+      "category": "Moderation"
+    },
+    "/rewards_info": {
+      "description": "Show the level rewards configured for this guild",
+      "environement": "Server sided",
+      "category": "Information"
+    },
+    "/settings": {
+      "description": "Open a quick settings menu for your personal and guild preferences",
+      "environement": "User sided",
+      "category": "Utils"
+    },
+    "/notes-lists-reminders": {
+      "description": "Manage your notes, checklists, and reminders",
+      "environement": "User sided",
+      "category": "Utils"
+    }
+  }
+}

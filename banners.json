@@ -1,0 +1,212 @@
+{
+  "classic_normal": {
+    "file": "classic_normal.png~",
+    "textcolor": "white",
+    "category": "2D"
+  },
+  "classic_alt": {
+    "file": "classic_alt.png~",
+    "textcolor": "white",
+    "category": "2D"
+  },
+  "classic_milestone": {
+    "file": "classic_milestone.png~",
+    "textcolor": "white",
+    "category": "2D"
+  },
+  "dripstone_cave": {
+    "file": "dripstone_cave.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "plains": {
+    "file": "plains.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "cherry_grove": {
+    "file": "cherry_grove.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "forest": {
+    "file": "forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "dark_forest": {
+    "file": "dark_forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "jungle": {
+    "file": "jungle.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "taiga_forest": {
+    "file": "taiga_forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "birch_forest": {
+    "file": "birch_forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "badland": {
+    "file": "badland.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "desert": {
+    "file": "desert.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+    "savanna": {
+    "file": "savanna.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "swamp": {
+    "file": "swamp.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "mangrove_swamp": {
+    "file": "mangrove_swamp.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "pale_garden": {
+    "file": "pale_garden.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "snowy_plains": {
+    "file": "snowy_plains.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "snowy_taiga": {
+    "file": "snowy_taiga.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "cave": {
+    "file": "cave.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "deep_cave": {
+    "file": "deep_cave.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "lush_cave": {
+    "file": "lush_cave.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "deep_dark": {
+    "file": "deep_dark.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "sulphur_cave": {
+    "file": "sulphur_cave.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "nether": {
+    "file": "nether.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "basalt_delta": {
+    "file": "basalt_delta.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "crismon_forest": {
+    "file": "crismon_forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "warped_forest": {
+    "file": "warped_forest.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "soul_valley": {
+    "file": "soul_valley.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "end": {
+    "file": "end.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "end_island": {
+    "file": "end_island.png~",
+    "textcolor": "white",
+    "category": "Vanilla"
+  },
+  "primordial_cave": {
+    "file": "primordial_cave.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "magnetic_cave": {
+    "file": "magnetic_cave.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "toxic_cave": {
+    "file": "toxic_cave.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "abyssal_chasm": {
+    "file": "abyssal_chasm.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "candy_cavity": {
+    "file": "candy_cavity.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "forlorn_hollow": {
+    "file": "forlorn_hollow.png~",
+    "textcolor": "white",
+    "category": "Alex's Caves"
+  },
+  "aether": {
+    "file": "aether.png~",
+    "textcolor": "white",
+    "category": "Aether"
+  },
+  "aerglow_forest": {
+    "file": "aerglow_forest.png~",
+    "textcolor": "white",
+    "category": "Aether"
+  },
+  "golden_grove": {
+    "file": "golden_grove.png~",
+    "textcolor": "white",
+    "category": "Aether"
+  },
+  "yagroot_swamp": {
+    "file": "yagroot_swamp.png~",
+    "textcolor": "white",
+    "category": "Aether"
+  },
+  "ERROR": {
+    "file": "ERROR.png~",
+    "textcolor": "white",
+    "category": "2D"
+  }
+}
