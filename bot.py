@@ -1,12 +1,30 @@
 print("------------------------ [starting] ------------------------")
-import asyncio
 import os
+import sys
+
+# Fail with a clear message when an upload missed project files (e.g. a new utils module).
+_ROOT = os.path.dirname(os.path.abspath(__file__))
+_REQUIRED_FILES = [
+    'save.py',
+    'cogs/__init__.py',
+    'utils/__init__.py', 'utils/audit.py', 'utils/automod.py', 'utils/banners.py', 'utils/counters.py',
+    'utils/economy.py', 'utils/formatting.py', 'utils/permissions.py', 'utils/reloader.py',
+    'utils/runtime.py', 'utils/user_settings.py', 'utils/views.py',
+]
+_missing = [path for path in _REQUIRED_FILES if not os.path.isfile(os.path.join(_ROOT, path))]
+if _missing:
+    print(f"[bot] missing project files in {_ROOT}: {', '.join(_missing)}")
+    sys.exit(1)
+
+import re
+import traceback
 
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
-import helper as main
+import save
+from utils import reloader, runtime
 
 load_dotenv()
 
@@ -41,22 +59,10 @@ class Bot(commands.AutoShardedBot):
             return False
 
     async def setup_hook(self):
+        # Runs after login, in the bot's own event loop, so cogs can start tasks right away.
         print('[bot] setup hook')
-        # Remove legacy prefix command registrations originating from main.py to avoid
-        # duplicate prefix-command handling when the migrated cogs also register wrappers.
-        removed = 0
-        for cmd in list(self.commands):
-            try:
-                mod = getattr(cmd.callback, '__module__', '')
-                if mod == 'main' or mod.startswith('main.'):
-                    self.remove_command(cmd.name)
-                    removed += 1
-            except Exception:
-                continue
-        if removed:
-            print(f'[bot] removed {removed} legacy prefix command(s) from main module')
-
         await _load_all_cogs()
+        reloader.remember_loaded_modules()
         await self.tree.sync()
         print('[bot] slash commands synced')
 
@@ -71,52 +77,6 @@ class Bot(commands.AutoShardedBot):
         print(f"[bot] serving {len(self.guilds)} guilds and {len(self.users)} users")
         print("------------------------ [startup finished] ------------------------")
 
-        try:
-            if not getattr(main, '_BACKUP_SCHEDULER_THREAD', None) or not main._BACKUP_SCHEDULER_THREAD.is_alive():
-                main.start_backup_scheduler(interval_seconds=12 * 60 * 60)
-                print('[backup] scheduler started for 12 hour interval')
-        except Exception as exc:
-            print(f'[backup] failed to start backup scheduler: {exc}')
-
-        try:
-            await main.restore_ticket_announce_views()
-            await main.restore_ticket_thread_views()
-        except Exception:
-            pass
-
-        try:
-            settings = main.load_user_settings()
-            users = settings.get('users', {}) if isinstance(settings, dict) else {}
-            for uid, uentry in users.items():
-                afk_dict = uentry.get('afk') if isinstance(uentry, dict) else None
-                if not isinstance(afk_dict, dict):
-                    continue
-                for gid, afk_entry in afk_dict.items():
-                    if not afk_entry or not afk_entry.get('enabled'):
-                        continue
-                    guild_obj = self.get_guild(int(gid)) if gid and str(gid).isdigit() else None
-                    if not guild_obj:
-                        continue
-                    member = guild_obj.get_member(int(uid)) if uid and str(uid).isdigit() else None
-                    key = main.get_afk_status_key(gid, uid)
-                    main.afk_status[key] = {
-                        'reason': afk_entry.get('reason', 'No reason provided.'),
-                        'original_nickname': afk_entry.get('original_nickname'),
-                        'message_times': [],
-                    }
-                    if member:
-                        me = getattr(member.guild, 'me', None)
-                        if me and me.guild_permissions.manage_nicknames:
-                            try:
-                                await member.edit(
-                                    nick=main.build_afk_nickname(afk_entry.get('original_nickname') or member.name),
-                                    reason='AFK status restored on bot startup',
-                                )
-                            except Exception:
-                                pass
-        except Exception:
-            pass
-
         loop_cog = self.get_cog('LoopCog')
         if loop_cog is not None:
             loop_cog.start_tasks()
@@ -124,24 +84,6 @@ class Bot(commands.AutoShardedBot):
         levels_cog = self.get_cog('LevelsCog')
         if levels_cog is not None and hasattr(levels_cog, 'start_tasks'):
             levels_cog.start_tasks()
-
-    async def on_message(self, message: discord.Message):
-        # Centralized message routing: run the existing monolith message handler first
-        # (it performs AFK checks, auto-replies, XP, etc.), then run command processing
-        # once via the Bot's process_commands to avoid duplicate prefix command execution.
-        try:
-            # If main.on_message exists, call it. It should not call bot.process_commands any more.
-            if hasattr(main, 'on_message'):
-                await main.on_message(message)
-        except Exception:
-            # swallow errors to avoid crashing the client on unhandled exceptions in legacy logic
-            import traceback
-            traceback.print_exc()
-        try:
-            await self.process_commands(message)
-        except Exception:
-            # let discord.py handle command errors separately
-            pass
 
     async def on_command_error(self, ctx: commands.Context, error: Exception):
         if isinstance(error, commands.CommandNotFound):
@@ -171,61 +113,33 @@ bot = Bot(
     help_command=None,
 )
 
-main.bot = bot
-
-
-@bot.event
-async def on_audit_log_entry_create(entry: discord.AuditLogEntry) -> None:
-    await main.on_audit_log_entry_create(entry)
-
-
-@bot.event
-async def on_automod_action(action: discord.AutoModAction) -> None:
-    await main.on_automod_action(action)
-
-
-@bot.event
-async def on_voice_state_update(member, before, after):
-    await main.on_voice_state_update(member, before, after)
-
-
-@bot.event
-async def on_raw_reaction_add(payload):
-    await main.on_raw_reaction_add(payload)
-
-
-@bot.event
-async def on_raw_reaction_remove(payload):
-    await main.on_raw_reaction_remove(payload)
-
-
-@bot.event
-async def on_guild_channel_delete(channel):
-    await main.on_guild_channel_delete(channel)
+runtime.bot = bot
 
 
 def _module_name(cog_name: str) -> str:
     return f'cogs.{cog_name}'
 
 
-DEFAULT_COG_NAMES = [
-    'economy',
-    'fun',
-    'games',
-    'legacy',
-    'levels',
-    'loop',
-    'media',
-    'misc',
-    'moderation',
-    'music',
-    'settings_notes_lists_reminders',
-    'utils',
-]
-
-
 def _load_cog_names() -> list[str]:
-    return DEFAULT_COG_NAMES.copy()
+    raw_value = (
+        os.getenv('COGS')
+        or os.getenv('COG_NAMES')
+        or os.getenv('BOT_COGS')
+        or ''
+    )
+    if not raw_value:
+        return []
+
+    names = []
+    seen = set()
+    for part in re.split(r'[\n,]+', raw_value):
+        candidate = str(part).strip().replace('-', '_').replace(' ', '_')
+        if not candidate or candidate.lower() == 'none':
+            continue
+        if candidate not in seen:
+            names.append(candidate)
+            seen.add(candidate)
+    return names
 
 
 def _persist_cog_names(names: list[str]) -> None:
@@ -240,7 +154,7 @@ def _persist_cog_names(names: list[str]) -> None:
             filtered.append(normalized)
             seen.add(normalized)
 
-    COG_NAMES = filtered or DEFAULT_COG_NAMES.copy()
+    COG_NAMES = filtered
 
 
 COG_NAMES = _load_cog_names()
@@ -253,6 +167,8 @@ def _resolve_cog_name(raw_name: str | None) -> str | None:
     normalized = raw_name.strip().lower().replace('-', '_').replace(' ', '_')
     if not normalized:
         return None
+    if normalized == 'all':
+        return 'all'
     for name in COG_NAMES:
         if normalized == name or normalized == name.replace('_', ''):
             return name
@@ -273,7 +189,12 @@ def _all_cog_names() -> list[str]:
 
 
 async def _load_all_cogs() -> None:
-    for cog_name in _all_cog_names():
+    cog_names = _all_cog_names()
+    if not cog_names:
+        print('[cog] no cogs configured from environment; nothing loaded')
+        return
+
+    for cog_name in cog_names:
         module_name = _module_name(cog_name)
         if module_name in bot.extensions:
             continue
@@ -281,7 +202,8 @@ async def _load_all_cogs() -> None:
             await bot.load_extension(module_name)
             print(f'[cog] loaded {module_name}')
         except Exception as exc:
-            print(f'[cog] failed to load {module_name}: {exc}')
+            print(f'[cog] failed to load {module_name}: {type(exc).__name__}: {exc}')
+            traceback.print_exc()
 
 
 async def _show_cog_menu(ctx: commands.Context) -> None:
@@ -310,19 +232,12 @@ async def cog_manager(ctx: commands.Context, action: str | None = None, cog_name
     if action is None:
         action = 'status'
     action = action.lower()
-    valid_actions = {'start', 'load', 'stop', 'unload', 'restart', 'reload', 'status', 'add', 'remove'}
+    valid_actions = {'start', 'load', 'stop', 'unload', 'restart', 'reload', 'status', 'add', 'remove', 'enable', 'disable'}
     if action not in valid_actions:
-        await ctx.send('Usage: `cogs [start|stop|restart|add|remove] <cog>` or `cogs` for the cog menu.')
+        await ctx.send('Usage: `cogs [add/start|remove/stop|reload/restart] <cog>` or `cogs` for the cog menu.')
         return
-    resolved = _resolve_cog_name(cog_name)
-    if action == 'status':
-        if resolved is None:
-            await _show_cog_menu(ctx)
-            return
-        state = 'loaded' if _module_name(resolved) in bot.extensions else 'stopped'
-        await ctx.send(f'`{resolved}` is currently `{state}`.')
-        return
-    if action == 'add':
+
+    if action in {'add', 'start', 'load', 'enable'}:
         if cog_name is None:
             await ctx.send('Please provide a cog name. Example: `cogs add economy`.')
             return
@@ -330,25 +245,29 @@ async def cog_manager(ctx: commands.Context, action: str | None = None, cog_name
         if not candidate:
             await ctx.send('Please provide a valid cog name.')
             return
-        if candidate in _all_cog_names():
-            await ctx.send(f'`{candidate}` is already enabled in the cog list.')
+        if candidate.lower() == 'all':
+            await ctx.send('`ALL` is not valid here. Use a single cog name.')
             return
         if not _cog_file_exists(candidate):
             await ctx.send(f'`{candidate}` was not found in the `cogs/` folder.')
             return
+
         module_name = _module_name(candidate)
+        current_names = list(COG_NAMES)
+        if candidate not in current_names:
+            _persist_cog_names([*current_names, candidate])
         try:
             if module_name not in bot.extensions:
                 await bot.load_extension(module_name)
-            _persist_cog_names([*COG_NAMES, candidate])
-            EXTERNAL_COGS[:] = [name for name in EXTERNAL_COGS if name != candidate]
-            await ctx.send(f'<:approve:1517452125687513158> Cog `{candidate}` added and loaded.')
-            print(f'[cog] added {module_name}')
+            print(f'[cog] started {module_name}')
+            await ctx.send(f'<:approve:1517452125687513158> Cog `{candidate}` started.')
         except Exception as exc:
-            await ctx.send(f'<:disapprove:1517452151012589662> Failed to load `{candidate}`: {exc}')
-            print(f'[cog] failed to add {module_name}: {exc}')
+            print(f'[cog] failed to enable {module_name}: {type(exc).__name__}: {exc}')
+            traceback.print_exc()
+            await ctx.send(f'<:disapprove:1517452151012589662> Failed to enable `{candidate}`: {exc}')
         return
-    if action == 'remove':
+
+    if action in {'remove', 'stop', 'unload', 'disable'}:
         if cog_name is None:
             await ctx.send('Please provide a cog name. Example: `cogs remove economy`.')
             return
@@ -356,45 +275,97 @@ async def cog_manager(ctx: commands.Context, action: str | None = None, cog_name
         if not candidate:
             await ctx.send('Please provide a valid cog name.')
             return
+        if candidate.lower() == 'all':
+            await ctx.send('`ALL` is not valid here. Use a single cog name.')
+            return
         if candidate not in _all_cog_names():
             await ctx.send(f'`{candidate}` is not active in the cog list.')
             return
+
         module_name = _module_name(candidate)
-        if module_name in bot.extensions:
-            await bot.unload_extension(module_name)
-        if candidate in EXTERNAL_COGS:
-            EXTERNAL_COGS.remove(candidate)
-        _persist_cog_names([name for name in COG_NAMES if name != candidate])
-        await ctx.send(f'<:disapprove:1517452151012589662> Cog `{candidate}` removed and unloaded.')
-        print(f'[cog] removed {module_name}')
+        try:
+            if module_name in bot.extensions:
+                await bot.unload_extension(module_name)
+            _persist_cog_names([name for name in COG_NAMES if name != candidate])
+            print(f'[cog] stopped {module_name}')
+            await ctx.send(f'<:disapprove:1517452151012589662> Cog `{candidate}` stopped.')
+        except Exception as exc:
+            print(f'[cog] failed to stop {module_name}: {type(exc).__name__}: {exc}')
+            traceback.print_exc()
+            await ctx.send(f'<:disapprove:1517452151012589662> Failed to stop `{candidate}`: {exc}')
         return
-    if resolved is None:
-        await ctx.send('Please provide a valid cog name. Example: `cogs restart economy`.')
-        return
-    module_name = _module_name(resolved)
-    if action == 'start' or action == 'load':
-        if module_name in bot.extensions:
-            await ctx.send(f'`{resolved}` is already loaded.')
+
+    if action in {'reload', 'restart'}:
+        if cog_name is None:
+            await ctx.send('Please provide a cog name. Example: `cogs reload economy` or `cogs reload all`.')
             return
-        await bot.load_extension(module_name)
-        await ctx.send(f'<:approve:1517452125687513158> Cog `{resolved}` started')
-        print(f'[cog] started {module_name}')
-        return
-    if action == 'stop' or action == 'unload':
-        if module_name not in bot.extensions:
-            await ctx.send(f'`{resolved}` is not loaded.')
+        resolved = _resolve_cog_name(cog_name)
+        if resolved is None:
+            await ctx.send('Please provide a valid cog name. Example: `cogs restart economy`.')
             return
-        await bot.unload_extension(module_name)
-        await ctx.send(f'<:disapprove:1517452151012589662> Cog `{resolved}` stopped')
-        print(f'[cog] stopped {module_name}')
+        await _restart_cogs(ctx, resolved)
         return
-    if module_name not in bot.extensions:
-        await ctx.send(f'<:approve:1517452125687513158> Cog `{resolved}` restarted by loading it first')
-        print(f'[cog] restarted {module_name}')
+
+    if action == 'status':
+        if cog_name is None:
+            await _show_cog_menu(ctx)
+            return
+        resolved = _resolve_cog_name(cog_name)
+        if resolved is None:
+            await _show_cog_menu(ctx)
+            return
+        state = 'loaded' if _module_name(resolved) in bot.extensions else 'stopped'
+        await ctx.send(f'`{resolved}` is currently `{state}`.')
         return
-    await bot.reload_extension(module_name)
-    await ctx.send(f'<:approve:1517452125687513158> Cog `{resolved}` restarted')
-    print(f'[cog] restarted {module_name}')
+
+
+async def _restart_cogs(ctx: commands.Context, resolved: str) -> None:
+    """Restart one cog (or `all`), reloading the changed save.py/utils modules it uses first."""
+    loaded_names = [name for name in _all_cog_names() if _module_name(name) in bot.extensions]
+    targets = loaded_names if resolved == 'all' else [resolved]
+    target_modules = [_module_name(name) for name in targets]
+
+    try:
+        reloaded_modules = reloader.reload_dependencies(target_modules)
+    except RuntimeError as exc:
+        print(f'[cog] dependency reload failed: {exc}')
+        traceback.print_exc()
+        await ctx.send(f'<:disapprove:1517452151012589662> Nothing was restarted, {exc}')
+        return
+    for module_name in reloaded_modules:
+        print(f'[cog] reloaded dependency {module_name}')
+
+    failed = []
+    for name, module_name in zip(targets, target_modules):
+        try:
+            if module_name in bot.extensions:
+                await bot.reload_extension(module_name)
+            else:
+                await bot.load_extension(module_name)
+            print(f'[cog] restarted {module_name}')
+        except Exception as exc:
+            print(f'[cog] failed to restart {module_name}: {type(exc).__name__}: {exc}')
+            traceback.print_exc()
+            failed.append(f'`{name}`: {exc}')
+
+    if failed:
+        lines = ['<:disapprove:1517452151012589662> Failed to restart ' + ', '.join(failed)]
+    elif resolved == 'all':
+        lines = [f'<:approve:1517452125687513158> All {len(targets)} cogs restarted.']
+    else:
+        lines = [f'<:approve:1517452125687513158> Cog `{resolved}` restarted.']
+
+    if reloaded_modules:
+        lines.append('Also reloaded: ' + ', '.join(f'`{name}`' for name in reloaded_modules))
+        others = reloader.modules_using(
+            reloaded_modules,
+            [_module_name(name) for name in loaded_names if name not in targets],
+        )
+        if others:
+            names = ', '.join(f"`{module_name.removeprefix('cogs.')}`" for module_name in others)
+            verb = 'uses' if len(others) == 1 else 'use'
+            lines.append(f'<:warning:1517452174991556758> {names} also {verb} these and keep the old version until restarted (or use `cogs restart all`).')
+    await ctx.send('\n'.join(lines))
 
 
 @bot.command(name='sync')
@@ -414,15 +385,10 @@ async def sync_commands(ctx: commands.Context) -> None:
         print(f'[bot] failed to sync command tree: {exc}')
 
 
-async def _startup() -> None:
-    await _load_all_cogs()
-
-
 if __name__ == '__main__':
     try:
-        main.start_backup_scheduler(interval_seconds=12 * 60 * 60)
-        print('[backup] scheduler started before bot login')
+        save.start_backup_scheduler(interval_seconds=12 * 60 * 60)
     except Exception as exc:
         print(f'[backup] startup scheduler failed before login: {exc}')
-    asyncio.run(_startup())
+    # Cogs are loaded in setup_hook, after login.
     bot.run(TOKEN)
