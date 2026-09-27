@@ -2,7 +2,8 @@ discord.py
 yt-dlp
 python-dotenv
 Pillow
-deep-translator
+Pilmoji
+googletrans
 aiohttp
 PyNaCl
 davey
