@@ -4,4 +4,5 @@ BOT_VERSION_ALTERNATE     # the name of the version, usually a single word (used
 ACTIVITY=                 # this is the activity that displays on the bot's profile
 SHARD_COUNT=              # to set how many shards the bot has
 PREFIX=                   # prefix for owner commands
-COG_NAMES=economy,fun,games,legacy,loop,media,misc,moderation,music,settings_notes_lists_reminders,utils,levels # changes if you add or remove a cog
+COG_NAMES=economy,fun,games,legacy,loop,media,moderation,music,settings,planner,utils,levels,misc,partnership,logs,afk,giveaways,tickets
+# cogs that the bot will load
